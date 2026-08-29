@@ -23,9 +23,9 @@ page <script> text ──runtime input──┐
 | Language | expressions, `var`/`let`/`const`, assignment, **compound assignment** (`+=` `-=` `*=` `/=` `%=`) and **`++`/`--`** (prefix and postfix), `if`/`else`, ternary `?:`, `while`, `for`, **`for...of`** and **`for...in`**, **`switch`** (with fallthrough), `break`/`continue`, blocks, **functions** (declarations, function expressions incl. named and immediate, parameters, `return`, recursion, mutual recursion, hoisting), **closures** (capture by reference), **arrays and objects** (literals, `.k`, `[k]`, `.length`, member assignment, nesting), **method calls** and `this`, **builtins** (`push`/`pop`/`filter`/`map`/`forEach`/`join`/`indexOf`/`includes`/`slice`; `charAt`/`indexOf`/`substring`/`toLowerCase`/`toUpperCase`/`split`/`includes`), **`throw`/`try`/`catch`/`finally`** with real `Error` objects and **`new Error(...)`**, `typeof` (including the spec's unresolvable reference, so `typeof window` is `undefined` rather than an error), short-circuit `&&`/`||`, comments |
 | Not yet | prototypes and `instanceof`, IEEE-754 numbers (integers only), host objects beyond the eight below — see Gaps |
 | Own tests | **251/251 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host, run in chunks) and on the restricted-ESM artifact |
-| Differential | **237/238 agree with a real host V8** (1 recorded divergence), and **51/51 agree with quickjs-ng** across language, DOM writes and events — the engine this one would replace — through `browser`'s `test/runtime-differential.cljs` |
+| Differential | **237/238 agree with a real host V8** (1 recorded divergence), and **62/63 agree with quickjs-ng** — 35/36 language, 22/22 DOM, 5/5 events — through `browser`'s `test/runtime-differential.cljs`, against the engine this one would replace |
 | Capabilities | **none** — `kotoba -M check` reports `:effects #{}`, DOM bridge included. A write is a VALUE the host replays; the authority never leaves the host |
-| wasm32-browser | **32 KB, instantiates and runs** — this is the target that replaces the QuickJS blob |
+| wasm32-browser | **35 KB, instantiates and runs** — this is the target that replaces the QuickJS blob |
 
 ## Build and test
 
