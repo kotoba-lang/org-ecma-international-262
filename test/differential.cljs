@@ -141,13 +141,36 @@
    "function outer() { function inner(k) { return k * 3; } return inner(4); } outer()"
    "function outer(n) { function ev(k) { if (k == 0) { return 1; } return od(k - 1); } function od(k) { if (k == 0) { return 0; } return ev(k - 1); } return ev(n); } outer(4)"
    "function make() { var c = 0; function inc() { c = c + 1; return c; } return inc; } var f = make(); f(); f()"
-   "function twice(g, x) { return g(g(x)); } function inc(n) { return n + 1; } twice(inc, 5)"])
+   "function twice(g, x) { return g(g(x)); } function inc(n) { return n + 1; } twice(inc, 5)"
+   ;; this
+   "function get() { return this.v; } var o = {v: 7, m: get}; o.m()"
+   "function sum() { return this.a + this.b; } var o = {a: 2, b: 3, go: sum}; o.go()"
+   "function f() { return typeof this; } f()"
+   ;; builtin methods
+   "[1, 2, 3].join('-')"
+   "[1, 2, 3].join()"
+   "[10, 20, 30].indexOf(20)"
+   "[10, 20].indexOf(99)"
+   "[1, 2, 3].includes(2)"
+   "[1, 2, 3, 4].slice(1, 3).join('')"
+   "'hello'.charAt(1)"
+   "'hello'.indexOf('ll')"
+   "'hello'.indexOf('zz')"
+   "'hello'.substring(1, 3)"
+   "'ABC'.toLowerCase()"
+   "'a,b,c'.split(',').join('-')"
+   "'a,b,c'.split(',').length"
+   "'hello'.includes('ell')"
+   "function mine() { return 42; } var o = {indexOf: mine}; o.indexOf()"
+   "var a = [3, 1, 2]; a.slice(0, 2).length"])
 
 (def known-divergences
   "Cases where this engine and a real one genuinely disagree, each with the
   reason. The set is asserted EXACTLY, so a divergence that appears or
   disappears fails the run instead of being absorbed silently."
   {"7 / 2" "JS numbers are IEEE-754 doubles; this engine's numbers are i64, so division truncates"
+   "function f() { return typeof this; } f()"
+   "a plain call has no receiver here, so `this` is undefined. A real engine in sloppy mode substitutes the GLOBAL object, which this engine does not have at all -- there is no globalThis to name."
    "function make() { var c = 0; function inc() { c = c + 1; return c; } return inc; } var f = make(); f(); f()"
    "closures capture BY VALUE: environments here are immutable strings, so inc updates its own copy and the outer c does not move. A read-only capture (makeAdder) agrees; a stateful counter does not."})
 

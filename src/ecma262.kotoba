@@ -84,7 +84,14 @@
             test-chained-call test-method-on-nested-object
             test-closure-captures-parameter test-closure-outlives-its-frame
             test-closure-shadows-caller test-closure-sees-outer-var
-            test-nested-function-declaration test-nested-mutual-recursion])
+            test-nested-function-declaration test-nested-mutual-recursion
+            test-this-on-object test-this-reads-sibling-property
+            test-plain-call-this-is-undefined-not-global
+            test-array-join test-array-join-default test-array-index-of
+            test-array-index-of-missing test-array-includes test-array-slice
+            test-string-char-at test-string-index-of test-string-substring
+            test-string-lower test-string-split test-string-split-length
+            test-string-includes test-own-property-beats-builtin])
 
   (:schemas
    {:js/r [:record :js/r
@@ -146,6 +153,9 @@
 ;; variable. That is why a member assignment's base must be a plain
 ;; identifier; `o.a.b = 1` would need to rebuild every container on the path
 ;; and is not supported.
+(defn builtin-r [name :string] [:ref :js/r]
+  (record-new [:ref :js/r] :builtin 0 name "" 0 0))
+
 (defn obj-r [body :string env :string] [:ref :js/r]
   (record-new [:ref :js/r] :object 0 body env 0 0))
 
@@ -221,6 +231,7 @@
         (= t :boolean) "b"
         (= t :null) "z"
         (= t :function) "f"
+        (= t :builtin) "B"
         (= t :object) "o"
         (= t :array) "a"
         :else "u"))
@@ -238,6 +249,7 @@
     (cond (= t :array) (arr-join x 0 "")
           (= t :object) "[object Object]"
           (= t :function) "function"
+          (= t :builtin) "function"
           (= t :number) (string-from-i64 (r-n x))
           (= t :boolean) (if (= (r-n x) 0) "false" "true")
           (= t :string) (r-s x)
@@ -252,6 +264,7 @@
         ;; again: where its parameter list starts and where its body starts.
         ;; There is no closure -- see `call-fn`.
         (= (r-t x) :function) (r-s x)
+        (= (r-t x) :builtin) (r-s x)
         ;; An object or array is stored as its own entry text, which is
         ;; length-prefixed, so nesting one inside another needs no escaping.
         (= (r-t x) :object) (r-s x)
@@ -281,6 +294,7 @@
           (string=? tc "s") (str-r body env 0)
           (string=? tc "z") (null-r env 0)
           (string=? tc "f") (fn-r body env)
+          (string=? tc "B") (builtin-r body)
           (string=? tc "o") (obj-r body env)
           (string=? tc "a") (arr-r body env)
           :else (undef-r env 0))))
@@ -338,14 +352,43 @@
 
 ;; A member read is the same operation on either container: an array's keys
 ;; are decimal indices, and `length` is the only name it answers itself.
+(defn array-method? [k :string] :bool
+  (cond (string=? k "join") true
+        (string=? k "indexOf") true
+        (string=? k "includes") true
+        (string=? k "slice") true
+        :else false))
+
+(defn string-method? [k :string] :bool
+  (cond (string=? k "charAt") true
+        (string=? k "indexOf") true
+        (string=? k "substring") true
+        (string=? k "toLowerCase") true
+        (string=? k "split") true
+        (string=? k "includes") true
+        :else false))
+
+;; A stored property wins over a builtin of the same name, so an object may
+;; carry its own `indexOf` without the table shadowing it. An array's own
+;; properties are decimal indices, so in practice only `length` collides and
+;; it is answered above.
 (defn member-of [x [:ref :js/r] k :string] [:ref :js/r]
-  (cond (= (r-t x) :array) (if (string=? k "length")
-                             (num-r (arr-len x) "" 0)
-                             (member-get (arr-entries x) k))
-        (= (r-t x) :object) (member-get (r-s x) k)
-        (= (r-t x) :string) (if (string=? k "length")
-                              (num-r (string-length (r-s x)) "" 0)
-                              (undef-r "" 0))
+  (cond (= (r-t x) :array)
+        (cond (string=? k "length") (num-r (arr-len x) "" 0)
+              (array-method? k) (builtin-r k)
+              :else (member-get (arr-entries x) k))
+
+        (= (r-t x) :object)
+        (let [own (member-get (r-s x) k)]
+          (if (= (r-t own) :undefined)
+            (if (array-method? k) (undef-r "" 0) own)
+            own))
+
+        (= (r-t x) :string)
+        (cond (string=? k "length") (num-r (string-length (r-s x)) "" 0)
+              (string-method? k) (builtin-r k)
+              :else (undef-r "" 0))
+
         (err? x) x
         :else (undef-r "" 0)))
 
@@ -359,6 +402,7 @@
           (= t :number) (not (= (r-n x) 0))
           (= t :string) (not (string=? (r-s x) ""))
           (= t :function) true
+          (= t :builtin) true
           (= t :object) true
           (= t :array) true
           (= t :undefined) false
@@ -374,6 +418,7 @@
           (= t :undefined) "undefined"
           (= t :null) "object"
           (= t :function) "function"
+          (= t :builtin) "function"
           (= t :object) "object"
           (= t :array) "object"
           :else "error")))
@@ -544,26 +589,45 @@
 ;;
 ;; The caller's environment is returned unchanged, so a function's bindings do
 ;; not leak back out.
-(defn call-fn [src :string f [:ref :js/r] ai :i64 env :string] [:ref :js/r]
-  (if (err? f)
-    f
-    (if (not (= (r-t f) :function))
-      (err-r "TypeError: value is not a function" env ai)
-      (let [base (hoist src (+ (fn-body-start f) 1) (string-concat (fn-env f) env))
-            bound (bind-args src (+ (fn-params-start f) 1) ai env base)]
-        (if (err? bound)
-          bound
-          (let [out (ex-stmt src (fn-body-start f) (r-s bound))]
-            (cond (err? out) out
+(defn call-fn [src :string f [:ref :js/r] ai :i64 env :string recv [:ref :js/r]]
+  [:ref :js/r]
+  (cond
+    (err? f) f
+
+    ;; A builtin has no source to re-read: its arguments are evaluated here
+    ;; and its receiver is the value the member access came from.
+    (= (r-t f) :builtin)
+    (let [args (ev-args-array src ai env 0 "")]
+      (if (err? args)
+        args
+        (joined (if (= (r-t recv) :array)
+                  (call-array-builtin (r-s f) recv args)
+                  (call-string-builtin (r-s f) recv args))
+                args)))
+
+    (not (= (r-t f) :function))
+    (err-r "TypeError: value is not a function" env ai)
+
+    :else
+    (let [base (hoist src (+ (fn-body-start f) 1)
+                      ;; `this` sits between the parameters -- which bind-args
+                      ;; prepends -- and the capture, so a parameter named
+                      ;; `this` shadows it and a captured name never does.
+                      (env-put (string-concat (fn-env f) env) "this" recv))
+          bound (bind-args src (+ (fn-params-start f) 1) ai env base)]
+      (if (err? bound)
+        bound
+        (let [out (ex-stmt src (fn-body-start f) (r-s bound))]
+          (cond (err? out) out
                   ;; The callee's `return` signal must be CLEARED here. It says
                   ;; "stop running the function", and leaving it set makes
                   ;; ex-seq stop running the CALLER too: `f(1); 42` evaluated
                   ;; to 1 and never reached 42, while `var z = f(1); z + 1`
                   ;; worked, because only the statement sequence reads the
                   ;; signal.
-                  (= (r-sig out) 1)
-                  (with-sig (with-i (with-env out env) (r-i bound)) 0)
-                  :else (undef-r env (r-i bound)))))))))
+                (= (r-sig out) 1)
+                (with-sig (with-i (with-env out env) (r-i bound)) 0)
+                :else (undef-r env (r-i bound))))))))
 
 (defn obj-key [s :string i :i64] [:ref :js/r]
   (let [c (cp s i)]
@@ -606,6 +670,104 @@
                     (ev-object s (if (at? s j 44) (+ j 1) j) (r-env v)
                                (env-put acc (r-s k) v)))))
               (err-r "SyntaxError: expected : in an object literal" env c))))))))
+
+;; ---------------------------------------------------------------------------
+;; builtin methods
+;; ---------------------------------------------------------------------------
+
+(defn ev-args-array [s :string i0 :i64 env :string n :i64 acc :string] [:ref :js/r]
+  (let [i (ws s i0)]
+    (if (at? s i 41)
+      (with-i (arr-r (arr-text n acc) env) (+ i 1))
+      (let [v (ev-expr s i env)]
+        (if (err? v)
+          v
+          (let [j (ws s (r-i v))]
+            (ev-args-array s (if (at? s j 44) (+ j 1) j) (r-env v) (+ n 1)
+                           (env-put acc (string-from-i64 n) v))))))))
+
+(defn arg-at [args [:ref :js/r] i :i64] [:ref :js/r] (arr-at args i))
+
+(defn arr-join-with [x [:ref :js/r] i :i64 sep :string acc :string] :string
+  (if (>= i (arr-len x))
+    acc
+    (arr-join-with x (+ i 1) sep
+                   (string-concat acc
+                                  (string-concat (if (= i 0) "" sep)
+                                                 (value-text (arr-at x i)))))))
+
+(defn arr-index-of [x [:ref :js/r] v [:ref :js/r] i :i64] :i64
+  (cond (>= i (arr-len x)) -1
+        (same-value? (arr-at x i) v) i
+        :else (arr-index-of x v (+ i 1))))
+
+(defn arr-slice [x [:ref :js/r] i :i64 stop :i64 acc :string] [:ref :js/r]
+  (if (>= i stop)
+    (arr-r (arr-text (if (< i 0) 0 i) acc) "")
+    (arr-slice x (+ i 1) stop acc)))
+
+;; The destination index is the output's own length, not `i`: a slice
+;; renumbers from zero, and writing to `i` left the head of the result as
+;; holes -- `[1,2,3,4].slice(1,3).join('')` rendered the gap instead of "23".
+(defn arr-take [x [:ref :js/r] i :i64 stop :i64 out [:ref :js/r]] [:ref :js/r]
+  (if (>= i stop)
+    out
+    (arr-take x (+ i 1) stop (arr-put out (arr-len out) (arr-at x i)))))
+
+(defn str-index-of [hay :string needle :string i :i64] :i64
+  (let [n (string-length needle)
+        h (string-length hay)]
+    (cond (> (+ i n) h) -1
+          (string=? (string-substring hay i (+ i n)) needle) i
+          :else (str-index-of hay needle (+ i 1)))))
+
+(defn str-split [hay :string sep :string i :i64 n :i64 acc :string] [:ref :js/r]
+  (let [hit (str-index-of hay sep i)]
+    (if (< hit 0)
+      (arr-r (arr-text (+ n 1)
+                       (env-put acc (string-from-i64 n)
+                                (str-r (string-substring hay i (string-length hay)) "" 0)))
+             "")
+      (str-split hay sep (+ hit (string-length sep)) (+ n 1)
+                 (env-put acc (string-from-i64 n)
+                          (str-r (string-substring hay i hit) "" 0))))))
+
+(defn call-array-builtin [name :string recv [:ref :js/r] args [:ref :js/r]] [:ref :js/r]
+  (cond
+    (string=? name "join")
+    (str-r (arr-join-with recv 0
+                          (if (= (r-t (arg-at args 0)) :undefined) "," (value-text (arg-at args 0)))
+                          "") "" 0)
+    (string=? name "indexOf") (num-r (arr-index-of recv (arg-at args 0) 0) "" 0)
+    (string=? name "includes") (bool-r (if (< (arr-index-of recv (arg-at args 0) 0) 0) 0 1) "" 0)
+    (string=? name "slice")
+    (let [len (arr-len recv)
+          from (if (= (r-t (arg-at args 0)) :undefined) 0 (r-n (arg-at args 0)))
+          to (if (= (r-t (arg-at args 1)) :undefined) len (r-n (arg-at args 1)))]
+      (arr-take recv (if (< from 0) 0 from) (if (> to len) len to)
+                (arr-r (arr-text 0 "") "")))
+    :else (err-r "TypeError: unsupported array method" "" 0)))
+
+(defn call-string-builtin [name :string recv [:ref :js/r] args [:ref :js/r]] [:ref :js/r]
+  (let [t (r-s recv)
+        len (string-length t)]
+    (cond
+      (string=? name "charAt")
+      (let [i (r-n (arg-at args 0))]
+        (str-r (if (if (< i 0) true (>= i len)) "" (string-substring t i (+ i 1))) "" 0))
+      (string=? name "indexOf")
+      (num-r (str-index-of t (value-text (arg-at args 0)) 0) "" 0)
+      (string=? name "includes")
+      (bool-r (if (< (str-index-of t (value-text (arg-at args 0)) 0) 0) 0 1) "" 0)
+      (string=? name "substring")
+      (let [a (if (= (r-t (arg-at args 0)) :undefined) 0 (r-n (arg-at args 0)))
+            b (if (= (r-t (arg-at args 1)) :undefined) len (r-n (arg-at args 1)))
+            lo (if (< a 0) 0 (if (> a len) len a))
+            hi (if (< b 0) 0 (if (> b len) len b))]
+        (str-r (if (<= lo hi) (string-substring t lo hi) (string-substring t hi lo)) "" 0))
+      (string=? name "toLowerCase") (str-r (string-fold-case t) "" 0)
+      (string=? name "split") (str-split t (value-text (arg-at args 0)) 0 0 "")
+      :else (err-r "TypeError: unsupported string method" "" 0))))
 
 (defn ev-primary [s :string i0 :i64 env :string] [:ref :js/r]
   (let [i (ws s i0)
@@ -661,7 +823,7 @@
 
 ;; `.name` and `[expr]` bind tighter than any operator, so they form their own
 ;; level between a primary and multiplication.
-(defn ev-postfix-rest [s :string acc [:ref :js/r]] [:ref :js/r]
+(defn ev-postfix-rest [s :string acc [:ref :js/r] recv [:ref :js/r]] [:ref :js/r]
   (let [i (ws s (r-i acc))]
     (cond
       (at? s i 46)
@@ -669,7 +831,8 @@
         (if (ident-start-cp? (cp s j))
           (let [e (ident-end s j)]
             (ev-postfix-rest s (joined (member-of acc (string-substring s j e))
-                                       (with-i acc e))))
+                                       (with-i acc e))
+                             acc))
           (err-r "SyntaxError: expected a property name after ." (r-env acc) j)))
 
       (at? s i 91)
@@ -679,7 +842,8 @@
           (let [j (ws s (r-i k))]
             (if (at? s j 93)
               (ev-postfix-rest s (joined (member-of acc (value-text k))
-                                         (with-i k (+ j 1))))
+                                         (with-i k (+ j 1)))
+                               acc)
               (err-r "SyntaxError: expected ]" (r-env k) j)))))
 
       ;; A call is a postfix too, which is the whole of method calls: after
@@ -687,13 +851,14 @@
       ;; separate rule. `this` is NOT bound -- a method runs as a plain
       ;; function and cannot see its receiver.
       (at? s i 40)
-      (let [r (call-fn s acc (+ i 1) (r-env acc))]
-        (if (err? r) r (ev-postfix-rest s r)))
+      (let [r (call-fn s acc (+ i 1) (r-env acc) recv)]
+        (if (err? r) r (ev-postfix-rest s r (undef-r "" 0))))
 
       :else (with-i acc i))))
 
 (defn ev-postfix [s :string i :i64 env :string] [:ref :js/r]
-  (let [r (ev-primary s i env)] (if (err? r) r (ev-postfix-rest s r))))
+  (let [r (ev-primary s i env)]
+    (if (err? r) r (ev-postfix-rest s r (undef-r "" 0)))))
 
 (defn mul-op [s :string i :i64] :i64
   (let [c (cp s i)]
@@ -1310,3 +1475,32 @@
   (num-is "function outer() { function inner(k) { return k * 3; } return inner(4); } outer()" 12))
 (defn test-nested-mutual-recursion []
   (num-is "function outer(n) { function ev(k) { if (k == 0) { return 1; } return od(k - 1); } function od(k) { if (k == 0) { return 0; } return ev(k - 1); } return ev(n); } outer(4)" 1))
+
+;; --- this ------------------------------------------------------------------
+(defn test-this-on-object []
+  (num-is "function get() { return this.v; } var o = {v: 7, m: get}; o.m()" 7))
+(defn test-this-reads-sibling-property []
+  (num-is "function sum() { return this.a + this.b; } var o = {a: 2, b: 3, go: sum}; o.go()" 5))
+;; A real engine in sloppy mode substitutes the GLOBAL object for a plain
+;; call's `this`. This engine has no global object to substitute, so `this`
+;; stays undefined -- a divergence, recorded as one in the differential corpus.
+(defn test-plain-call-this-is-undefined-not-global []
+  (str-is "function f() { return typeof this; } f()" "undefined"))
+
+;; --- builtin methods -------------------------------------------------------
+(defn test-array-join [] (str-is "[1, 2, 3].join('-')" "1-2-3"))
+(defn test-array-join-default [] (str-is "[1, 2, 3].join()" "1,2,3"))
+(defn test-array-index-of [] (num-is "[10, 20, 30].indexOf(20)" 1))
+(defn test-array-index-of-missing [] (num-is "[10, 20].indexOf(99)" -1))
+(defn test-array-includes [] (str-is "[1, 2, 3].includes(2)" "true"))
+(defn test-array-slice [] (str-is "[1, 2, 3, 4].slice(1, 3).join('')" "23"))
+
+(defn test-string-char-at [] (str-is "'hello'.charAt(1)" "e"))
+(defn test-string-index-of [] (num-is "'hello'.indexOf('ll')" 2))
+(defn test-string-substring [] (str-is "'hello'.substring(1, 3)" "el"))
+(defn test-string-lower [] (str-is "'ABC'.toLowerCase()" "abc"))
+(defn test-string-split [] (str-is "'a,b,c'.split(',').join('-')" "a-b-c"))
+(defn test-string-split-length [] (num-is "'a,b,c'.split(',').length" 3))
+(defn test-string-includes [] (str-is "'hello'.includes('ell')" "true"))
+(defn test-own-property-beats-builtin []
+  (num-is "function mine() { return 42; } var o = {indexOf: mine}; o.indexOf()" 42))
