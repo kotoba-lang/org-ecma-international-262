@@ -91,12 +91,15 @@ only the two simplest tests pass at that setting.
   lets a function reach a sibling declared later, and itself, neither of which
   a snapshot taken at declaration time can contain.
 - **A wasm32 module may carry at most 256 typed literals** (`browser-host.mjs`
-  rejects more with `too many typed ABI literals`). The engine is comfortably
-  under it; the build that also carries the 156 test functions — each holding
-  its JavaScript source as a string — is not. So the tests are exercised on
-  the restricted-ESM artifact, which has no such ceiling, and the engine's
-  wasm32 artifact is verified to instantiate and run separately. Splitting the
-  test build into chunks would restore in-wasm test runs and has not been done.
+  rejects more with `too many typed ABI literals`), and the engine is close
+  enough to that ceiling that it cannot also carry its 170 tests. Restricting
+  the EXPORT list does not help, which is the opposite of how unreachable
+  functions behave: measured 2026-08-29, a build that DEFINES 170 tests and
+  exports 3 still exceeds the ceiling, while a build physically containing
+  only those 3 passes. **Function bodies are dropped when unreachable; their
+  literals are not.** `test/wasm-suite.cljs` therefore slices the source
+  physically and runs five chunks — 170/170 inside wasm32. As the engine grows
+  it will approach the ceiling on its own, and that is the thing to watch.
 - **Cells are never freed.** The cell region only grows, because a cell id is
   its length at allocation and reuse would hand the same number out twice. A
   long-running program bounded by the 64 KiB string ceiling will reach it; a
@@ -115,3 +118,16 @@ only the two simplest tests pass at that setting.
 ECMA-262. The origin plane applies because the subject is someone else's
 specification (root ADR-2608040100). The name is not a claim of conformance —
 the Status table above is the claim.
+
+## Running the tests inside wasm32
+
+```bash
+nbb test/wasm-suite.cljs        # five chunks of 40, each compiled and run as its own module
+nbb test/wasm-suite.cljs 20     # smaller chunks
+```
+
+Exit 0 every test passed, 1 a test failed, **2 the harness could not answer**
+(no compiler, no host) — which is not the same as passing. It picks the
+compiler by RUNNING it rather than by looking for the file, because
+`bin/kotoba` used to exit 194 with no output at all when its `node_modules`
+could not resolve nbb.
