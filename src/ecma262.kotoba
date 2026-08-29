@@ -102,6 +102,10 @@
             test-function-expression test-function-expression-immediate
             test-function-expression-in-array test-named-function-expression
             test-declaration-needs-a-name
+            test-break-in-while test-break-in-for test-continue-in-for
+            test-break-only-leaves-the-inner-loop test-break-inside-if
+            test-finally-runs test-finally-after-throw test-finally-without-catch
+            test-finally-return-wins test-finally-sees-catch-binding
             test-error-message test-error-name test-error-is-an-object
             test-thrown-value-is-not-wrapped test-type-error-name
             test-ternary-true test-ternary-false test-ternary-nested-in-arg
@@ -121,7 +125,8 @@
             [:n :i64]         ; numeric payload, or a scan result
             [:s :string]      ; text payload
             [:env :string]    ; the environment, encoded
-            [:sig :i64]       ; 0 normal, 1 return, 2 error, 3 empty completion
+            [:sig :i64]       ; 0 normal, 1 return, 2 error, 3 empty completion,
+                              ; 4 break, 5 continue
             [:i :i64]]]}))    ; source index after what was just read
 
 ;; ---------------------------------------------------------------------------
@@ -726,6 +731,10 @@
                   ;; signal.
                 (= (r-sig out) 1)
                 (with-sig (with-i (with-env out env) (r-i bound)) 0)
+                ;; A `break` that escaped every loop stops at the function
+                ;; boundary rather than travelling into the caller.
+                (if (= (r-sig out) 4) true (= (r-sig out) 5))
+                (undef-r env (r-i bound))
                 :else (undef-r env (r-i bound))))))))
 
 (defn obj-key [s :string i :i64] [:ref :js/r]
@@ -1403,6 +1412,10 @@
         (let [b (ex-stmt s bi (r-env c))]
           (cond (err? b) b
                 (= (r-sig b) 1) b
+                ;; `break` leaves the loop; `continue` still runs the update,
+                ;; which is what makes `for (;; i = i + 1) { continue; }`
+                ;; terminate rather than spin.
+                (= (r-sig b) 4) (undef-r (r-env b) (skip-stmt s bi))
                 :else (let [u (ev-expr s ui (r-env b))]
                         (if (err? u) u (ex-for s ci ui bi (r-env u))))))
         (undef-r (r-env c) (skip-stmt s bi))))))
@@ -1417,6 +1430,7 @@
             (let [b (ex-stmt s (+ j 1) (r-env c))]
               (cond (err? b) b
                     (= (r-sig b) 1) b
+                    (= (r-sig b) 4) (undef-r (r-env b) (skip-stmt s (+ j 1)))
                     :else (ex-while s ci (r-env b))))
             (undef-r (r-env c) (skip-stmt s (+ j 1))))
           (err-r "SyntaxError: expected ) after while condition" (r-env c) j))))))
@@ -1476,34 +1490,56 @@
     (member-get (r-s e) "v")
     (error-object (r-s e))))
 
+(defn finally-block [s :string i :i64] :i64
+  (let [m (ws s i)] (if (word? s m "finally") (ws s (+ m 7)) -1)))
+
+;; A `finally` runs whether or not the try threw and whether or not a catch
+;; handled it. Its own `return` wins, and an error inside it replaces the one
+;; that was travelling -- both of which a real engine does too. Otherwise the
+;; result is the try's or the catch's, with the environment the finally left.
+(defn run-finally [s :string fin :i64 r [:ref :js/r] end :i64] [:ref :js/r]
+  (if (< fin 0)
+    (with-i r end)
+    (let [f (ex-stmt s fin (r-env r))]
+      (cond (err? f) f
+            (= (r-sig f) 1) f
+            :else (with-i (with-env r (r-env f)) end)))))
+
+(defn catch-name [s :string o :i64] :string
+  (let [n0 (ws s (+ o 1))] (string-substring s n0 (ident-end s n0))))
+
+;; `try { A } catch (e) { B } finally { C }`, with either handler optional but
+;; not both. The blocks are located once and then run; there is no separate
+;; parse, as everywhere else in this evaluator.
 (defn ex-try [s :string i :i64 env :string] [:ref :js/r]
   (let [b (ws s (+ i 3))]
     (if (not (at? s b 123))
       (err-r "SyntaxError: expected { after try" env b)
       (let [after (skip-stmt s b)
-            m (ws s after)]
-        (if (not (word? s m "catch"))
-          (err-r "SyntaxError: try without catch is not supported" env m)
-          (let [o (ws s (+ m 5))]
-            (if (not (at? s o 40))
-              (err-r "SyntaxError: expected ( after catch" env o)
-              (let [n0 (ws s (+ o 1))
-                    ne (ident-end s n0)
-                    name (string-substring s n0 ne)
-                    c (ws s ne)]
-                (if (not (at? s c 41))
-                  (err-r "SyntaxError: expected ) after the catch parameter" env c)
-                  (let [cb (ws s (+ c 1))
-                        ran (ex-stmt s b env)]
-                    (if (err? ran)
-                      ;; The handler runs with the caught value bound, and the
-                      ;; error stops here: the result carries signal 0, so the
-                      ;; enclosing sequence keeps going.
-                      (let [out (ex-stmt s cb (env-put env name (caught-value ran)))]
-                        (if (err? out) out (with-i out (skip-stmt s cb))))
-                      (if (= (r-sig ran) 1)
-                        ran
-                        (with-i ran (skip-stmt s cb))))))))))))))
+            m (ws s after)
+            has-catch (word? s m "catch")
+            o (if has-catch (ws s (+ m 5)) -1)
+            cb (if has-catch
+                 (let [c (ws s (ident-end s (ws s (+ o 1))))]
+                   (if (at? s c 41) (ws s (+ c 1)) -1))
+                 -1)
+            after-catch (if (>= cb 0) (skip-stmt s cb) after)
+            fin (finally-block s after-catch)
+            end (if (>= fin 0) (skip-stmt s fin) after-catch)]
+        (cond
+          (if has-catch (< cb 0) false)
+          (err-r "SyntaxError: malformed catch clause" env m)
+
+          (if has-catch false (< fin 0))
+          (err-r "SyntaxError: try needs a catch or a finally" env m)
+
+          :else
+          (let [ran (ex-stmt s b env)]
+            (if (if (err? ran) (>= cb 0) false)
+              (run-finally s fin
+                           (ex-stmt s cb (env-put env (catch-name s o) (caught-value ran)))
+                           end)
+              (run-finally s fin ran end))))))))
 
 (defn ex-stmt [s :string i0 :i64 env :string] [:ref :js/r]
   (let [i (ws s i0)]
@@ -1557,6 +1593,15 @@
       (let [v (ev-expr s (+ i 5) env)]
         (if (err? v) v (throw-r v (r-env v) (eat-semi s (r-i v)))))
 
+      ;; `break` and `continue` travel the way `return` does -- as a signal on
+      ;; the carrier -- and the loops are what stop them. A sequence passes
+      ;; them up untouched, so they cross blocks and `if` bodies for free.
+      (word? s i "break")
+      (with-sig (undef-r env (eat-semi s (+ i 5))) 4)
+
+      (word? s i "continue")
+      (with-sig (undef-r env (eat-semi s (+ i 8))) 5)
+
       (word? s i "return")
       (let [j (ws s (+ i 6))]
         (if (if (at? s j 59) true (< (cp s j) 0))
@@ -1583,6 +1628,8 @@
       (let [r (ex-stmt s j (r-env acc))]
         (cond (err? r) r
               (= (r-sig r) 1) r
+              (= (r-sig r) 4) r
+              (= (r-sig r) 5) r
               (<= (r-i r) j) (err-r "SyntaxError: statement made no progress" (r-env r) j)
               (= (r-sig r) 3) (ex-seq s (r-i r)
                                       (with-i (with-env acc (r-env r)) (r-i r))
@@ -1909,3 +1956,29 @@
   (str-is "try { throw 5; } catch (e) { typeof e }" "number"))
 (defn test-type-error-name []
   (str-is "var x = 1; try { x() } catch (e) { e.name }" "TypeError"))
+
+;; --- break / continue ------------------------------------------------------
+(defn test-break-in-while []
+  (num-is "var i = 0; while (i < 10) { if (i == 3) { break; } i = i + 1; } i" 3))
+(defn test-break-in-for []
+  (num-is "var t = 0; for (var i = 0; i < 10; i = i + 1) { if (i == 4) { break; } t = t + 1; } t" 4))
+;; `continue` must still run the update, or the loop never terminates.
+(defn test-continue-in-for []
+  (num-is "var t = 0; for (var i = 0; i < 5; i = i + 1) { if (i == 2) { continue; } t = t + 1; } t" 4))
+(defn test-break-only-leaves-the-inner-loop []
+  (num-is "var t = 0; for (var i = 0; i < 3; i = i + 1) { for (var j = 0; j < 5; j = j + 1) { if (j == 1) { break; } t = t + 1; } } t" 3))
+(defn test-break-inside-if []
+  (num-is "var i = 0; while (true) { if (i >= 2) { break; } i = i + 1; } i" 2))
+
+;; --- finally ---------------------------------------------------------------
+(defn test-finally-runs []
+  (num-is "var t = 0; try { t = 1; } catch (e) { t = 2; } finally { t = t + 10; } t" 11))
+(defn test-finally-after-throw []
+  (num-is "var t = 0; try { throw 1; } catch (e) { t = 5; } finally { t = t + 10; } t" 15))
+(defn test-finally-without-catch []
+  (num-is "var t = 0; try { t = 1; } finally { t = t + 10; } t" 11))
+;; A `return` inside finally wins over the one the try was carrying.
+(defn test-finally-return-wins []
+  (num-is "function f() { try { return 1; } finally { return 2; } } f()" 2))
+(defn test-finally-sees-catch-binding []
+  (num-is "var t = 0; try { throw 3; } catch (e) { t = e; } finally { t = t + 1; } t" 4))

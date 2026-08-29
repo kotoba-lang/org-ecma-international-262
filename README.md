@@ -20,12 +20,12 @@ page <script> text ──runtime input──┐
 
 | | |
 |---|---|
-| Language | expressions, `var`/`let`/`const`, assignment, `if`/`else`, `while`, blocks, **functions** (declaration, parameters, `return`, recursion, mutual recursion, hoisting), **arrays and objects** (literals, `.k`, `[k]`, `.length`, member assignment, nesting), **`for`**, **method calls** (`o.f()`, `a[0]()`, `f()()`), **closures**, `typeof`, comments, string/number/boolean/undefined/null/function/object |
-| Not yet | `try`, `this`, prototypes, array builtins, `for...in`/`of` — see Gaps |
-| Own tests | **106/106 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host) and on the restricted-ESM artifact |
-| Differential | **115/117 agree with a real host V8**, 2 recorded divergences (`test/differential.cljs`) |
+| Language | expressions, `var`/`let`/`const`, assignment, `if`/`else`, ternary `?:`, `while`, `for`, `break`/`continue`, blocks, **functions** (declarations, function expressions incl. named and immediate, parameters, `return`, recursion, mutual recursion, hoisting), **closures** (capture by reference — a counter keeps state, two closures share one cell), **arrays and objects** (literals, `.k`, `[k]`, `.length`, member assignment, nesting), **method calls** and `this`, **builtins** (`push`/`pop`/`filter`/`map`/`forEach`/`join`/`indexOf`/`includes`/`slice`; `charAt`/`indexOf`/`substring`/`toLowerCase`/`split`/`includes`), **`throw`/`try`/`catch`/`finally`** with real `Error` objects (`.message`, `.name`, `ReferenceError`/`TypeError`), short-circuit `&&`/`||`, `typeof`, comments |
+| Not yet | prototypes and `instanceof`, `for...in`/`of`, `switch`, IEEE-754 numbers (integers only) — see Gaps |
+| Own tests | **180/180 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host, run in five chunks) and on the restricted-ESM artifact |
+| Differential | **197/198 agree with a real host V8**, 1 recorded divergence (`test/differential.cljs`) |
 | Capabilities | **none** — `kotoba -M check` reports `:effects #{}`. A pure interpreter asks the host for nothing |
-| wasm32-browser | **29 KB, instantiates and runs** — this is the target that replaces the QuickJS blob |
+| wasm32-browser | **26 KB, instantiates and runs** — this is the target that replaces the QuickJS blob |
 
 ## Build and test
 
@@ -98,7 +98,7 @@ only the two simplest tests pass at that setting.
   exports 3 still exceeds the ceiling, while a build physically containing
   only those 3 passes. **Function bodies are dropped when unreachable; their
   literals are not.** `test/wasm-suite.cljs` therefore slices the source
-  physically and runs five chunks — 170/170 inside wasm32. As the engine grows
+  physically and runs five chunks — 180/180 inside wasm32. As the engine grows
   it will approach the ceiling on its own, and that is the thing to watch.
 - **Cells are never freed.** The cell region only grows, because a cell id is
   its length at allocation and reuse would hand the same number out twice. A

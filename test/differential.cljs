@@ -222,7 +222,19 @@
    "try { nope } catch (e) { e.name }"
    "try { throw 5; } catch (e) { typeof e }"
    "var x = 1; try { x() } catch (e) { e.name }"
-   "function f() { return typeof this; } f()"])
+   "function f() { return typeof this; } f()"
+   ;; break / continue
+   "var i = 0; while (i < 10) { if (i == 3) { break; } i = i + 1; } i"
+   "var t = 0; for (var i = 0; i < 10; i = i + 1) { if (i == 4) { break; } t = t + 1; } t"
+   "var t = 0; for (var i = 0; i < 5; i = i + 1) { if (i == 2) { continue; } t = t + 1; } t"
+   "var t = 0; for (var i = 0; i < 3; i = i + 1) { for (var j = 0; j < 5; j = j + 1) { if (j == 1) { break; } t = t + 1; } } t"
+   "var i = 0; while (true) { if (i >= 2) { break; } i = i + 1; } i"
+   ;; finally
+   "var t = 0; try { t = 1; } catch (e) { t = 2; } finally { t = t + 10; } t"
+   "var t = 0; try { throw 1; } catch (e) { t = 5; } finally { t = t + 10; } t"
+   "var t = 0; try { t = 1; } finally { t = t + 10; } t"
+   "function f() { try { return 1; } finally { return 2; } } f()"
+   "var t = 0; try { throw 3; } catch (e) { t = e; } finally { t = t + 1; } t"])
 
 (def known-divergences
   "Cases where this engine and a real one genuinely disagree, each with the
