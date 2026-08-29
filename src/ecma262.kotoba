@@ -106,6 +106,17 @@
             test-break-only-leaves-the-inner-loop test-break-inside-if
             test-finally-runs test-finally-after-throw test-finally-without-catch
             test-finally-return-wins test-finally-sees-catch-binding
+            test-typeof-undeclared test-typeof-member-of-undeclared-throws
+            test-typeof-declared-still-reports-its-type
+            test-string-upper test-method-reference-is-truthy
+            test-property-of-null-throws test-property-of-undefined-throws
+            test-new-error-message test-new-error-name test-new-error-no-args
+            test-new-unknown-constructor test-thrown-new-error-is-an-object
+            test-plus-equals test-plus-equals-string test-minus-equals
+            test-times-equals test-postfix-increment test-postfix-in-for
+            test-postfix-answers-the-old-value test-prefix-increment
+            test-prefix-answers-the-new-value test-postfix-decrement
+            test-compound-on-undeclared-throws
             test-error-message test-error-name test-error-is-an-object
             test-thrown-value-is-not-wrapped test-type-error-name
             test-ternary-true test-ternary-false test-ternary-nested-in-arg
@@ -460,11 +471,25 @@
         (string=? k "slice") true
         :else false))
 
+;; There is a case-folding builtin but no upper-casing one, so this indexes
+;; the uppercase alphabet by the offset of the lowercase letter. ASCII only,
+;; like the rest of this engine's text handling (see Gaps).
+(defn to-upper [t :string i :i64 acc :string] :string
+  (if (>= i (string-length t))
+    acc
+    (let [c (cp t i)]
+      (to-upper t (+ i 1)
+                (string-concat acc
+                               (if (if (>= c 97) (<= c 122) false)
+                                 (string-substring "ABCDEFGHIJKLMNOPQRSTUVWXYZ" (- c 97) (- c 96))
+                                 (string-substring t i (+ i 1))))))))
+
 (defn string-method? [k :string] :bool
   (cond (string=? k "charAt") true
         (string=? k "indexOf") true
         (string=? k "substring") true
         (string=? k "toLowerCase") true
+        (string=? k "toUpperCase") true
         (string=? k "split") true
         (string=? k "includes") true
         :else false))
@@ -491,6 +516,16 @@
               :else (undef-r "" 0))
 
         (err? x) x
+
+        ;; Reading a property of null or undefined THROWS. It is not the same
+        ;; as reading a missing property, and page scripts depend on the
+        ;; difference: it is what makes `try { el.textContent } catch (e) {}`
+        ;; a guard rather than a no-op. Measured against quickjs-ng.
+        (= (r-t x) :null)
+        (err-r "TypeError: cannot read a property of null" (r-env x) (r-i x))
+        (= (r-t x) :undefined)
+        (err-r "TypeError: cannot read a property of undefined" (r-env x) (r-i x))
+
         :else (undef-r "" 0)))
 
 ;; ---------------------------------------------------------------------------
@@ -918,14 +953,60 @@
             hi (if (< b 0) 0 (if (> b len) len b))]
         (str-r (if (<= lo hi) (string-substring t lo hi) (string-substring t hi lo)) "" 0))
       (string=? name "toLowerCase") (str-r (string-fold-case t) "" 0)
+      (string=? name "toUpperCase") (str-r (to-upper t 0 "") "" 0)
       (string=? name "split") (str-split t (value-text (arg-at args 0)) 0 0 "")
       :else (err-r "TypeError: unsupported string method" "" 0))))
+
+;; The constructors this engine admits. There are no prototypes here, so
+;; `new` is not general: an unknown constructor is refused by name rather
+;; than silently producing an empty object.
+(defn error-ctor? [nm :string] :i64
+  (cond
+    (string=? nm "Error") 1
+    (string=? nm "TypeError") 1
+    (string=? nm "RangeError") 1
+    (string=? nm "ReferenceError") 1
+    (string=? nm "SyntaxError") 1
+    :else 0))
+
+;; `new Error("boom")` builds the SAME plain {name, message} object that a
+;; caught error becomes (see `error-object`). The two must agree, or
+;; `catch (e) { e.message }` would answer differently depending on whether the
+;; engine threw or the script did.
+(defn ev-new [s :string i :i64 env :string] [:ref :js/r]
+  (let [j (ws s i)]
+    (if (ident-start-cp? (cp s j))
+      (let [e (ident-end s j)
+            nm (string-substring s j e)
+            k (ws s e)]
+        (if (= (error-ctor? nm) 1)
+          (if (at? s k 40)
+            (let [args (ev-args-array s (+ k 1) env 0 "")]
+              (if (err? args)
+                args
+                (let [msg (if (= (arr-len args) 0) "" (value-text (arr-at args 0)))]
+                  (with-i (with-env (obj-r (entry-put (entry-put "" "message" (str-r msg "" 0))
+                                                      "name" (str-r nm "" 0)) "")
+                                    (r-env args))
+                          (r-i args)))))
+            (with-i (with-env (obj-r (entry-put (entry-put "" "message" (str-r "" "" 0))
+                                                "name" (str-r nm "" 0)) "")
+                              env)
+                    k))
+          (err-r "TypeError: unsupported constructor" env j)))
+      (err-r "SyntaxError: expected a constructor name after new" env j))))
 
 (defn ev-primary [s :string i0 :i64 env :string] [:ref :js/r]
   (let [i (ws s i0)
         c (cp s i)]
     (cond
       (< c 0) (err-r "SyntaxError: unexpected end of input" env i)
+
+      (if (= c 43) (= (cp s (+ i 1)) 43) false)
+      (ev-prefix-incdec s (+ i 2) env 1)
+
+      (if (= c 45) (= (cp s (+ i 1)) 45) false)
+      (ev-prefix-incdec s (+ i 2) env 0)
 
       (= c 45)
       (let [r (ev-postfix s (+ i 1) env)]
@@ -971,9 +1052,25 @@
       (word? s i "null") (null-r env (+ i 4))
       (word? s i "undefined") (undef-r env (+ i 9))
 
+      ;; `typeof` is the one place an undeclared name is not an error. The
+      ;; spec resolves an UNRESOLVABLE REFERENCE to "undefined", and that is
+      ;; the whole reason `typeof window !== 'undefined'` -- how real page
+      ;; scripts feature-detect -- can be written at all. Only a BARE
+      ;; identifier gets it: `typeof a.b` with `a` undeclared still throws,
+      ;; because that is a member access on undefined, not an unresolvable
+      ;; reference. Measured against quickjs-ng, which is the runtime this
+      ;; engine would replace.
+      (word? s i "new") (ev-new s (+ i 3) env)
+
       (word? s i "typeof")
-      (let [r (ev-postfix s (+ i 6) env)]
-        (str-r (type-name r) (r-env r) (r-i r)))
+      (let [j (ws s (+ i 6))]
+        (if (= (unresolvable-ref? s j env) 1)
+          (str-r "undefined" env (ident-end s j))
+          (let [r (ev-postfix s (+ i 6) env)]
+            ;; An error is an error. Naming its TYPE would report "error" as
+            ;; though that were a JavaScript type, which is how `typeof
+            ;; document` used to answer.
+            (if (err? r) r (str-r (type-name r) (r-env r) (r-i r))))))
 
       ;; A bare identifier is just a lookup; `ev-postfix-rest` turns a
       ;; following `(` into the call.
@@ -982,6 +1079,36 @@
         (with-i (env-get env (string-substring s i e)) e))
 
       :else (err-r "SyntaxError: unexpected character" env i))))
+
+;; A word that is its own value, not a name to look up. `typeof true` must
+;; answer "boolean", so these must not be mistaken for unresolvable names
+;; merely because the environment holds no binding called "true".
+(defn literal-word? [w :string] :i64
+  (cond
+    (string=? w "true") 1
+    (string=? w "false") 1
+    (string=? w "null") 1
+    (string=? w "undefined") 1
+    (string=? w "this") 1
+    (string=? w "function") 1
+    (string=? w "new") 1
+    :else 0))
+
+;; 1 when position `j` begins a bare identifier that resolves to nothing --
+;; the spec's unresolvable reference. A following `.`, `[` or `(` disqualifies
+;; it: those are accesses, and an access on an undeclared name throws.
+(defn unresolvable-ref? [s :string j :i64 env :string] :i64
+  (if (ident-start-cp? (cp s j))
+    (let [e (ident-end s j)
+          k (ws s e)]
+      (cond
+        (at? s k 46) 0
+        (at? s k 91) 0
+        (at? s k 40) 0
+        (= (literal-word? (string-substring s j e)) 1) 0
+        (err? (env-get env (string-substring s j e))) 1
+        :else 0))
+    0))
 
 ;; `.name` and `[expr]` bind tighter than any operator, so they form their own
 ;; level between a primary and multiplication.
@@ -1288,11 +1415,62 @@
                   updated
                   (with-env v (env-set (r-env v) name updated)))))))))))
 
+;; `x += E`, `x++`, `++x`. Real page scripts are written with these -- every
+;; `for` loop in the browser demo's own <script> tags uses `i++` -- while
+;; every test in this file was written with `i = i + 1`, which is exactly the
+;; kind of gap a differential against a real engine exists to find.
+;; Only a plain identifier is a target, for the same persistence reason a
+;; member assignment's base must be one (see `dot-assign-eq`).
+(defn compound-op [s :string i :i64] :i64
+  (if (= (cp s (+ i 1)) 61)
+    (let [c (cp s i)]
+      (cond (= c 43) 1
+            (= c 45) 2
+            (= c 42) 3
+            (= c 47) 4
+            (= c 37) 5
+            :else 0))
+    0))
+
+(defn compound-end [s :string i :i64] :i64
+  (if (ident-start-cp? (cp s i))
+    (let [e (ident-end s i)]
+      (if (= (compound-op s (ws s e)) 0) -1 e))
+    -1))
+
+(defn incdec-end [s :string i :i64] :i64
+  (if (ident-start-cp? (cp s i))
+    (let [e (ident-end s i)
+          j (ws s e)
+          c (cp s j)]
+      (cond
+        (if (= c 43) (= (cp s (+ j 1)) 43) false) e
+        (if (= c 45) (= (cp s (+ j 1)) 45) false) e
+        :else -1))
+    -1))
+
+;; `++x` answers with the NEW value; `x++` (below, in `ev-expr`) answers with
+;; the old one. In a `for` update the answer is discarded, but `a[i++]` is not
+;; rare and the two are not interchangeable there.
+(defn ev-prefix-incdec [s :string i :i64 env :string up :i64] [:ref :js/r]
+  (let [j (ws s i)]
+    (if (ident-start-cp? (cp s j))
+      (let [e (ident-end s j)
+            name (string-substring s j e)
+            cur (env-get env name)]
+        (if (err? cur)
+          cur
+          (let [nu (num-r (if (= up 1) (+ (r-n cur) 1) (- (r-n cur) 1)) "" 0)]
+            (with-i (with-env nu (env-set env name nu)) e))))
+      (err-r "SyntaxError: expected a variable after ++ or --" env j))))
+
 (defn ev-expr [s :string i0 :i64 env :string] [:ref :js/r]
   (let [i (ws s i0)
         e (assign-end s i)
         d (dot-assign-eq s i)
-        x (index-assign-eq s i)]
+        x (index-assign-eq s i)
+        p (compound-end s i)
+        u (incdec-end s i)]
     (cond
       (>= e 0) (let [name (string-substring s i e)
                      j (ws s e)
@@ -1300,6 +1478,36 @@
                  (if (err? v) v (with-env v (env-set (r-env v) name v))))
       (>= d 0) (ev-member-assign s i env d)
       (>= x 0) (ev-member-assign s i env x)
+
+      ;; `x op= E` is `x = x op (E)`, evaluated once. `binop` already knows
+      ;; that `+` on a string concatenates, so `s += "a"` needs no separate
+      ;; rule -- which is the whole reason it goes through `binop`.
+      (>= p 0) (let [name (string-substring s i p)
+                     j (ws s p)
+                     cur (env-get env name)]
+                 (if (err? cur)
+                   cur
+                   (let [v (ev-expr s (+ j 2) env)]
+                     (if (err? v)
+                       v
+                       (let [nu (binop (compound-op s j) cur v)]
+                         (if (err? nu)
+                           nu
+                           (with-i (with-env nu (env-set (r-env v) name nu))
+                                   (r-i v))))))))
+
+      ;; Postfix: the answer is the value BEFORE the step.
+      (>= u 0) (let [name (string-substring s i u)
+                     j (ws s u)
+                     cur (env-get env name)]
+                 (if (err? cur)
+                   cur
+                   (let [nu (num-r (if (= (cp s j) 43)
+                                     (+ (r-n cur) 1)
+                                     (- (r-n cur) 1)) "" 0)]
+                     (with-i (with-env (num-r (r-n cur) "" 0)
+                                       (env-set env name nu))
+                             (+ j 2)))))
       :else
       ;; A conditional expression evaluates ONLY the arm it takes; the other is
       ;; stepped over by `skip-expr`, which does not run it.
@@ -1982,3 +2190,44 @@
   (num-is "function f() { try { return 1; } finally { return 2; } } f()" 2))
 (defn test-finally-sees-catch-binding []
   (num-is "var t = 0; try { throw 3; } catch (e) { t = e; } finally { t = t + 1; } t" 4))
+
+;; --- the five gaps the quickjs differential found -------------------------
+;; Each of these agreed with nothing until it was fixed; they are the reason
+;; `browser`'s test/runtime-differential.cljs exists.
+(defn test-typeof-undeclared [] (str-is "typeof nope" "undefined"))
+(defn test-typeof-member-of-undeclared-throws []
+  (str-is "try { typeof nope.x } catch (e) { e.name }" "ReferenceError"))
+(defn test-typeof-declared-still-reports-its-type []
+  (str-is "var nope = 1; typeof nope" "number"))
+(defn test-string-upper [] (str-is "'abc'.toUpperCase()" "ABC"))
+;; The feature-detection idiom: the METHOD, not a call of it.
+(defn test-method-reference-is-truthy []
+  (str-is "'x'.toUpperCase ? 'has' : 'lacks'" "has"))
+(defn test-property-of-null-throws []
+  (str-is "try { null.x; 'no-throw' } catch (e) { e.name }" "TypeError"))
+(defn test-property-of-undefined-throws []
+  (str-is "try { undefined.x; 'no-throw' } catch (e) { 'caught' }" "caught"))
+(defn test-new-error-message []
+  (str-is "try { throw new Error('boom'); } catch (e) { e.message }" "boom"))
+(defn test-new-error-name [] (str-is "new TypeError('x').name" "TypeError"))
+(defn test-new-error-no-args [] (str-is "'[' + new Error().message + ']'" "[]"))
+(defn test-new-unknown-constructor []
+  (str-is "try { new Widget(); 'no-throw' } catch (e) { 'caught' }" "caught"))
+(defn test-thrown-new-error-is-an-object []
+  (str-is "try { throw new Error('x'); } catch (e) { typeof e }" "object"))
+
+;; --- compound assignment and ++/-- ---------------------------------------
+(defn test-plus-equals [] (num-is "var x = 1; x += 2; x" 3))
+(defn test-plus-equals-string [] (str-is "var s = 'a'; s += 'b'; s" "ab"))
+(defn test-minus-equals [] (num-is "var x = 10; x -= 4; x" 6))
+(defn test-times-equals [] (num-is "var x = 3; x *= 4; x" 12))
+(defn test-postfix-increment [] (num-is "var x = 1; x++; x" 2))
+;; The form every real `for` loop is written in.
+(defn test-postfix-in-for []
+  (num-is "var t = 0; for (var i = 0; i < 5; i++) { t += i; } t" 10))
+(defn test-postfix-answers-the-old-value [] (num-is "var x = 5; var y = x++; y" 5))
+(defn test-prefix-increment [] (num-is "var x = 1; ++x; x" 2))
+(defn test-prefix-answers-the-new-value [] (num-is "var x = 5; var y = ++x; y" 6))
+(defn test-postfix-decrement [] (num-is "var x = 5; x--; x" 4))
+(defn test-compound-on-undeclared-throws []
+  (str-is "try { nope += 1; 'no-throw' } catch (e) { e.name }" "ReferenceError"))

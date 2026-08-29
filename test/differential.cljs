@@ -234,7 +234,32 @@
    "var t = 0; try { throw 1; } catch (e) { t = 5; } finally { t = t + 10; } t"
    "var t = 0; try { t = 1; } finally { t = t + 10; } t"
    "function f() { try { return 1; } finally { return 2; } } f()"
-   "var t = 0; try { throw 3; } catch (e) { t = e; } finally { t = t + 1; } t"])
+   "var t = 0; try { throw 3; } catch (e) { t = e; } finally { t = t + 1; } t"
+   ;; unresolvable references, constructors, and property access on nothing
+   "typeof nope"
+   "typeof window"
+   "var nope = 1; typeof nope"
+   "try { typeof nope.x } catch (e) { e.name }"
+   "'abc'.toUpperCase()"
+   "'x'.toUpperCase ? 'has' : 'lacks'"
+   "try { null.x; 'no-throw' } catch (e) { e.name }"
+   "try { undefined.x; 'no-throw' } catch (e) { 'caught' }"
+   "try { throw new Error('boom'); } catch (e) { e.message }"
+   "new TypeError('x').name"
+   "'[' + new Error().message + ']'"
+   "try { throw new Error('x'); } catch (e) { typeof e }"
+   ;; compound assignment and ++/-- : how real page scripts are written
+   "var x = 1; x += 2; x"
+   "var s = 'a'; s += 'b'; s"
+   "var x = 10; x -= 4; x"
+   "var x = 3; x *= 4; x"
+   "var x = 1; x++; x"
+   "var t = 0; for (var i = 0; i < 5; i++) { t += i; } t"
+   "var x = 5; var y = x++; y"
+   "var x = 1; ++x; x"
+   "var x = 5; var y = ++x; y"
+   "var x = 5; x--; x"
+   "try { nope += 1; 'no-throw' } catch (e) { e.name }"])
 
 (def known-divergences
   "Cases where this engine and a real one genuinely disagree, each with the

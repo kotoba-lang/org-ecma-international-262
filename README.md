@@ -20,10 +20,10 @@ page <script> text ──runtime input──┐
 
 | | |
 |---|---|
-| Language | expressions, `var`/`let`/`const`, assignment, `if`/`else`, ternary `?:`, `while`, `for`, `break`/`continue`, blocks, **functions** (declarations, function expressions incl. named and immediate, parameters, `return`, recursion, mutual recursion, hoisting), **closures** (capture by reference — a counter keeps state, two closures share one cell), **arrays and objects** (literals, `.k`, `[k]`, `.length`, member assignment, nesting), **method calls** and `this`, **builtins** (`push`/`pop`/`filter`/`map`/`forEach`/`join`/`indexOf`/`includes`/`slice`; `charAt`/`indexOf`/`substring`/`toLowerCase`/`split`/`includes`), **`throw`/`try`/`catch`/`finally`** with real `Error` objects (`.message`, `.name`, `ReferenceError`/`TypeError`), short-circuit `&&`/`||`, `typeof`, comments |
+| Language | expressions, `var`/`let`/`const`, assignment, **compound assignment** (`+=` `-=` `*=` `/=` `%=`) and **`++`/`--`** (prefix and postfix), `if`/`else`, ternary `?:`, `while`, `for`, `break`/`continue`, blocks, **functions** (declarations, function expressions incl. named and immediate, parameters, `return`, recursion, mutual recursion, hoisting), **closures** (capture by reference), **arrays and objects** (literals, `.k`, `[k]`, `.length`, member assignment, nesting), **method calls** and `this`, **builtins** (`push`/`pop`/`filter`/`map`/`forEach`/`join`/`indexOf`/`includes`/`slice`; `charAt`/`indexOf`/`substring`/`toLowerCase`/`toUpperCase`/`split`/`includes`), **`throw`/`try`/`catch`/`finally`** with real `Error` objects and **`new Error(...)`**, `typeof` (including the spec's unresolvable reference, so `typeof window` is `undefined` rather than an error), short-circuit `&&`/`||`, comments |
 | Not yet | prototypes and `instanceof`, `for...in`/`of`, `switch`, IEEE-754 numbers (integers only) — see Gaps |
-| Own tests | **180/180 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host, run in five chunks) and on the restricted-ESM artifact |
-| Differential | **197/198 agree with a real host V8**, 1 recorded divergence (`test/differential.cljs`) |
+| Own tests | **203/203 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host, run in chunks) and on the restricted-ESM artifact |
+| Differential | **220/221 agree with a real host V8** (1 recorded divergence), and **35/35 agree with quickjs-ng** — the engine this one would replace — through `browser`'s `test/runtime-differential.cljs` |
 | Capabilities | **none** — `kotoba -M check` reports `:effects #{}`. A pure interpreter asks the host for nothing |
 | wasm32-browser | **26 KB, instantiates and runs** — this is the target that replaces the QuickJS blob |
 
@@ -105,10 +105,17 @@ only the two simplest tests pass at that setting.
   long-running program bounded by the 64 KiB string ceiling will reach it; a
   page script will not. Freeing needs a reachability pass this engine has no
   reason to run yet.
-- **A method does not see its receiver.** `o.f()` calls `f`; there is no
-  `this`.
+- **`new` is only the Error constructors.** `new Error("boom")` builds the
+  same plain `{name, message}` object a caught error becomes; any other
+  constructor is refused BY NAME rather than silently producing an empty
+  object. There are no prototypes and no `instanceof`.
 - **Numbers are i64, not IEEE-754 doubles.** This is the one recorded
-  divergence from the host engine (`7 / 2` is 3, not 3.5).
+  divergence from the host engine (`7 / 2` is 3, not 3.5). It is a gap in the
+  *language*, measured 2026-08-29: `:f64` values pass through Kotoba, but
+  arithmetic on them has no admitted lowering (`(+ x x)` on two `:f64` is
+  rejected with `expected i64, got f64`), so doubles would have to be built in
+  software on top of i64 (`bit-and`, `bit-or`, `bit-xor` and `quot` are
+  admitted; shifts are not, and are `*`/`quot` by powers of two).
 - **Source is treated as ASCII.** `string-length` counts code points while
   `string-substring` takes byte boundaries; they agree only for ASCII.
 
