@@ -278,7 +278,14 @@
    "var t = 7; switch (5) { case 1: t = 1; break; } t"
    "var t = 0; for (var i = 0; i < 3; i++) { switch (i) { case 1: break; } t++; } t"
    "function f(x) { switch (x) { case 1: return 'one'; default: return 'other'; } } f(1) + f(2)"
-   "var o = ''; switch ('b') { case 'a': o = 'A'; break; case 'b': o = 'B'; break; } o"])
+   "var o = ''; switch ('b') { case 'a': o = 'A'; break; case 'b': o = 'B'; break; } o"
+   ;; instanceof -- what a catch actually asks
+   "try { nope } catch (e) { e instanceof Error ? 'yes' : 'no' }"
+   "var x = 1; try { x() } catch (e) { e instanceof TypeError ? 'yes' : 'no' }"
+   "try { nope } catch (e) { e instanceof TypeError ? 'yes' : 'no' }"
+   "var o = {a: 1}; o instanceof Error ? 'yes' : 'no'"
+   "1 instanceof Error ? 'yes' : 'no'"
+   "new RangeError('x') instanceof Error ? 'yes' : 'no'"])
 
 (def known-divergences
   "Cases where this engine and a real one genuinely disagree, each with the

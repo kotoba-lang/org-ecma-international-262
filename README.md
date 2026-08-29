@@ -21,8 +21,8 @@ page <script> text ──runtime input──┐
 | | |
 |---|---|
 | Language | expressions, `var`/`let`/`const`, assignment, **compound assignment** (`+=` `-=` `*=` `/=` `%=`) and **`++`/`--`** (prefix and postfix), `if`/`else`, ternary `?:`, `while`, `for`, **`for...of`** and **`for...in`**, **`switch`** (with fallthrough), `break`/`continue`, blocks, **functions** (declarations, function expressions incl. named and immediate, parameters, `return`, recursion, mutual recursion, hoisting), **closures** (capture by reference), **arrays and objects** (literals, `.k`, `[k]`, `.length`, member assignment, nesting), **method calls** and `this`, **builtins** (`push`/`pop`/`filter`/`map`/`forEach`/`join`/`indexOf`/`includes`/`slice`; `charAt`/`indexOf`/`substring`/`toLowerCase`/`toUpperCase`/`split`/`includes`), **`throw`/`try`/`catch`/`finally`** with real `Error` objects and **`new Error(...)`**, `typeof` (including the spec's unresolvable reference, so `typeof window` is `undefined` rather than an error), short-circuit `&&`/`||`, comments |
-| Not yet | prototypes and `instanceof`, IEEE-754 numbers (integers only), host objects beyond the eight below — see Gaps |
-| Own tests | **251/251 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host, run in chunks) and on the restricted-ESM artifact |
+| Not yet | prototypes (`instanceof` answers without one — see Gaps), IEEE-754 numbers (integers only), host objects beyond the nine below |
+| Own tests | **262/262 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host, run in chunks) and on the restricted-ESM artifact |
 | Differential | **237/238 agree with a real host V8** (1 recorded divergence), and **62/63 agree with quickjs-ng** — 35/36 language, 22/22 DOM, 5/5 events — through `browser`'s `test/runtime-differential.cljs`, against the engine this one would replace |
 | Capabilities | **none** — `kotoba -M check` reports `:effects #{}`, DOM bridge included. A write is a VALUE the host replays; the authority never leaves the host |
 | wasm32-browser | **35 KB, instantiates and runs** — this is the target that replaces the QuickJS blob |
@@ -105,6 +105,12 @@ only the two simplest tests pass at that setting.
   long-running program bounded by the 64 KiB string ceiling will reach it; a
   page script will not. Freeing needs a reachability pass this engine has no
   reason to run yet.
+- **`instanceof` answers without a prototype chain.** There is none to walk,
+  so it answers the question a `catch` actually asks — `e instanceof
+  TypeError` — by matching the caught error's `name`, and `e instanceof Error`
+  is true for any of them. A constructor this engine does not have answers
+  `false`, which is a real answer rather than a refusal: nothing here is an
+  instance of it. What is missing is user constructors, not the operator.
 - **`new` is only the Error constructors.** `new Error("boom")` builds the
   same plain `{name, message}` object a caught error becomes; any other
   constructor is refused BY NAME rather than silently producing an empty
@@ -175,6 +181,7 @@ than three.
 | element | `textContent`, `getAttribute(n)` | `textContent`, `setAttribute(n, v)`, `addEventListener(type, fn)` |
 | `document` | `title`, `getElementById(id)` | `title` |
 | `console` | — | `log(…)` |
+| global | — | `setTimeout(fn, ms)` |
 
 That is the whole surface. Anything else is `undefined`, which a page script
 can test for — the same way it tests for a feature a browser does not have.
@@ -197,6 +204,12 @@ document.getElementById('btn').addEventListener('click', function () {
 eval-dom       -> 16:addEventListener3:btn10:5:click1:0
 eval-dom-event(…, 0) -> 11:textContent3:out5:fired
 ```
+
+`setTimeout` is the same shape and shares the same registry — it hands the
+host a function too, and a guest with no capabilities has no clock. Its
+registration carries the delay and a handler number, and it answers that
+number, because the handler number is the only identity this engine has to
+give as a timer id.
 
 `eval-dom-event` re-runs the script to rebuild the environment, clears the
 log, and calls handler *n*, so only that handler's own effects come back.

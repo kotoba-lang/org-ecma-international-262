@@ -144,6 +144,12 @@
             test-dom-title-read test-dom-title-write test-dom-title-default
             test-console-log test-console-log-two-arguments
             test-console-is-not-an-element
+            test-instanceof-error test-instanceof-type-error
+            test-instanceof-the-wrong-error test-instanceof-a-plain-object
+            test-instanceof-a-number test-instanceof-an-unknown-constructor
+            test-instanceof-new-error
+            test-set-timeout-registration test-set-timeout-fires
+            test-set-timeout-answers-an-id test-set-timeout-shares-the-registry
             test-error-message test-error-name test-error-is-an-object
             test-thrown-value-is-not-wrapped test-type-error-name
             test-ternary-true test-ternary-false test-ternary-nested-in-arg
@@ -1319,6 +1325,29 @@
       ;; function and cannot see its receiver.
       (at? s i 40)
       (cond
+        ;; `setTimeout` is the same shape as `addEventListener`: it hands the
+        ;; host a function to call later, so what comes back is the
+        ;; REGISTRATION -- the delay and a handler number -- and firing it is
+        ;; the same second entry point. A guest with no capabilities has no
+        ;; clock and no way to be called back; it can only say what it wants
+        ;; done and when.
+        (if (= (r-t acc) :builtin) (string=? (r-s acc) "setTimeout") false)
+        (let [args (ev-args-array s (+ i 1) (r-env acc) 0 "")]
+          (if (err? args)
+            args
+            (let [n (handler-count (r-env args))
+                  e (fx-append (env-set (env-set (r-env args) (handler-name n)
+                                                 (arr-at args 0))
+                                        "%hn" (num-r (+ n 1) "" 0))
+                               "#window" "setTimeout"
+                               (string-concat
+                                (fx-field (value-text (arr-at args 1)))
+                                (fx-field (string-from-i64 n))))]
+              ;; A real one answers a timer id; the handler number is the only
+              ;; identity this engine has, so it is the id.
+              (ev-postfix-rest s (with-i (with-env (num-r n "" 0) e) (r-i args))
+                               (undef-r "" 0) ""))))
+
         ;; `console.log` is an effect like any other: the guest says what it
         ;; wants written, the host decides whether anything is listening.
         (if (= (r-t acc) :builtin) (string=? (r-s acc) "log") false)
@@ -1501,12 +1530,49 @@
           (= c 62) 7
           :else 0)))
 
+;; `instanceof`, as far as an engine with no prototype chain can honestly
+;; answer it. There is no chain to walk, so the question it CAN answer is the
+;; one page scripts actually ask in a `catch`: is this one of the Error kinds?
+;; A caught error is a plain object carrying `name`, so `e instanceof Error`
+;; is true for any of them and `e instanceof TypeError` only for that one.
+;; Any other constructor answers false rather than guessing -- and that is a
+;; real answer, not a refusal: nothing in this engine is an instance of a
+;; constructor it does not have.
+(defn instance-of? [x [:ref :js/r] ctor :string] :i64
+  (if (= (r-t x) :object)
+    (let [nm (member-get (r-s x) "name")]
+      (if (= (r-t nm) :string)
+        (cond
+          (string=? ctor "Error") (if (str-ends-with? (r-s nm) "Error") 1 0)
+          (string=? ctor (r-s nm)) 1
+          :else 0)
+        0))
+    0))
+
+(defn str-ends-with? [t :string suffix :string] :bool
+  (let [n (string-length t)
+        m (string-length suffix)]
+    (if (< n m) false (string=? (string-substring t (- n m) n) suffix))))
+
 (defn ev-rel-rest [s :string acc [:ref :js/r]] [:ref :js/r]
   (let [i (ws s (r-i acc))
         op (rel-op s i)
         w (if (if (= op 8) true (= op 9)) 2 1)]
-    (if (= op 0)
-      (with-i acc i)
+    (cond
+      ;; Its right-hand side is a CONSTRUCTOR NAME, not a value: there is no
+      ;; constructor object here to evaluate, so the name is read directly.
+      (word? s i "instanceof")
+      (let [j (ws s (+ i 10))]
+        (if (ident-start-cp? (cp s j))
+          (let [e (ident-end s j)]
+            (ev-rel-rest s (bool-r (instance-of? acc (string-substring s j e))
+                                   (r-env acc) e)))
+          (err-r "SyntaxError: expected a constructor name after instanceof"
+                 (r-env acc) j)))
+
+      (= op 0) (with-i acc i)
+
+      :else
       (let [rhs (ev-add s (+ i w) (r-env acc))]
         (if (err? rhs)
           rhs
@@ -2352,10 +2418,11 @@
 ;; length-prefixed entry format the environment uses (`dom-entry` builds one).
 ;; The answer is the effect log, which the host replays. Nothing else crosses.
 (defn dom-env [dom :string] :string
-  (env-put (env-put (env-put (env-put "" "%dom" (str-r dom "" 0))
-                             "%fx" (str-r "" "" 0))
-                    "document" (node-r "#document"))
-           "console" (node-r "#console")))
+  (env-put (env-put (env-put (env-put (env-put "" "%dom" (str-r dom "" 0))
+                                      "%fx" (str-r "" "" 0))
+                             "document" (node-r "#document"))
+                    "console" (node-r "#console"))
+           "setTimeout" (builtin-r "setTimeout")))
 
 (defn dom-node [text :string] :string
   (entry-put "" "textContent" (str-r text "" 0)))
@@ -2947,3 +3014,45 @@
   (if (string=? (eval-dom-value "console.getAttribute ? 'has' : 'lacks'"
                                 (dom-entry "" "a" ""))
                 "has") 1 0))
+
+;; --- instanceof -----------------------------------------------------------
+;; No prototype chain, so this answers the question a `catch` actually asks.
+(defn test-instanceof-error []
+  (str-is "try { nope } catch (e) { e instanceof Error ? 'yes' : 'no' }" "yes"))
+(defn test-instanceof-type-error []
+  (str-is "var x = 1; try { x() } catch (e) { e instanceof TypeError ? 'yes' : 'no' }" "yes"))
+(defn test-instanceof-the-wrong-error []
+  (str-is "try { nope } catch (e) { e instanceof TypeError ? 'yes' : 'no' }" "no"))
+(defn test-instanceof-a-plain-object []
+  (str-is "var o = {a: 1}; o instanceof Error ? 'yes' : 'no'" "no"))
+(defn test-instanceof-a-number []
+  (str-is "1 instanceof Error ? 'yes' : 'no'" "no"))
+;; A constructor this engine does not have answers false -- which is a real
+;; answer, since nothing here is an instance of it.
+(defn test-instanceof-an-unknown-constructor []
+  (str-is "var o = {a: 1}; o instanceof Widget ? 'yes' : 'no'" "no"))
+(defn test-instanceof-new-error []
+  (str-is "new RangeError('x') instanceof Error ? 'yes' : 'no'" "yes"))
+
+;; --- setTimeout -----------------------------------------------------------
+;; The same shape as addEventListener: register, then fire through the same
+;; second entry point. A guest with no capabilities has no clock.
+(defn test-set-timeout-registration []
+  (dom-is "setTimeout(function () { }, 250);" (dom-entry "" "a" "")
+          "10:setTimeout7:#window8:3:2501:0"))
+(defn test-set-timeout-fires []
+  (if (string=? (eval-dom-event
+                 "var r = document.getElementById('a'); setTimeout(function () { r.textContent = 'late'; }, 10);"
+                 (dom-entry "" "a" "now")
+                 0)
+                "11:textContent1:a4:late") 1 0))
+(defn test-set-timeout-answers-an-id []
+  (if (string=? (eval-dom-value "setTimeout(function () { }, 5)" (dom-entry "" "a" ""))
+                "0") 1 0))
+;; Timers and listeners share one registry, so their numbers do not collide.
+(defn test-set-timeout-shares-the-registry []
+  (if (string=? (eval-dom-event
+                 "var r = document.getElementById('a'); document.getElementById('a').addEventListener('click', function () { r.textContent = 'click'; }); setTimeout(function () { r.textContent = 'timer'; }, 1);"
+                 (dom-entry "" "a" "now")
+                 1)
+                "11:textContent1:a5:timer") 1 0))
