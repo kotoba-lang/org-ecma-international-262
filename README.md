@@ -22,7 +22,7 @@ page <script> text ──runtime input──┐
 |---|---|
 | Language | expressions, `var`/`let`/`const`, assignment, `if`/`else`, `while`, blocks, `typeof`, comments, string/number/boolean/undefined/null |
 | Not yet | functions, objects, arrays, `for`, `try`, closures, prototypes — see Gaps |
-| Own tests | 48, run on **:jvm-kir** (reference KIR) and **restricted ESM** by `kotoba -M test` |
+| Own tests | 48, all passing on the **restricted-ESM** artifact (`instantiateKotoba`, run under node) |
 | Differential | **56/57 agree with a real host V8**, 1 recorded divergence (`test/differential.cljs`) |
 | Capabilities | **none** — `kotoba -M check` reports `:effects #{}`. A pure interpreter asks the host for nothing |
 | wasm32-browser | compiles (16 KB) but the emitted module **does not instantiate** — an amu backend defect, see Gaps |
@@ -31,12 +31,19 @@ page <script> text ──runtime input──┐
 
 ```bash
 kotoba -M check src/ecma262.kotoba                       # types + effects
-kotoba -M test  src/ecma262.kotoba                       # 48 tests per target
 
 kotoba -M compile src/ecma262.kotoba --target js \
   --fuel 200000000 --output target/ecma262.mjs
 nbb test/differential.cljs                               # vs the host engine
 ```
+
+`kotoba -M test` runs every `test-*` export on three targets at once, which is
+the right harness for this repo, but it **cannot complete today**: its wasm
+stage fails as a process because of the backend defect below, and the failure
+aborts the whole run rather than reporting the two targets that did work. So
+the 48 own tests are currently exercised through the compiled restricted-ESM
+artifact instead. The `:jvm-kir` figure is therefore **unmeasured for this
+engine** -- it was measured only for the small probes that led to it.
 
 `--fuel` is not optional. The default budget is **512 operations for the life
 of an instance**, which a parser spends before it reaches the first statement;
