@@ -21,8 +21,8 @@ page <script> text ──runtime input──┐
 | | |
 |---|---|
 | Language | expressions, `var`/`let`/`const`, assignment, **compound assignment** (`+=` `-=` `*=` `/=` `%=`) and **`++`/`--`** (prefix and postfix), `if`/`else`, ternary `?:`, `while`, `for`, **`for...of`** and **`for...in`**, **`switch`** (with fallthrough), `break`/`continue`, blocks, **functions** (declarations, function expressions incl. named and immediate, parameters, `return`, recursion, mutual recursion, hoisting), **closures** (capture by reference), **arrays and objects** (literals, `.k`, `[k]`, `.length`, member assignment, nesting), **method calls** and `this`, **builtins** (`push`/`pop`/`filter`/`map`/`forEach`/`join`/`indexOf`/`includes`/`slice`; `charAt`/`indexOf`/`substring`/`toLowerCase`/`toUpperCase`/`split`/`includes`), **`throw`/`try`/`catch`/`finally`** with real `Error` objects and **`new Error(...)`**, `typeof` (including the spec's unresolvable reference, so `typeof window` is `undefined` rather than an error), short-circuit `&&`/`||`, comments |
-| Not yet | prototypes (`instanceof` answers without one — see Gaps), IEEE-754 numbers (integers only), host objects beyond the ten below |
-| Own tests | **267/267 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host, run in chunks) and on the restricted-ESM artifact |
+| Not yet | user constructors and a prototype chain (`instanceof` answers without one — see Gaps), IEEE-754 numbers (integers only) |
+| Own tests | **275/275 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host, run in chunks) and on the restricted-ESM artifact |
 | Differential | **237/238 agree with a real host V8** (1 recorded divergence), and **62/63 agree with quickjs-ng** — 35/36 language, 22/22 DOM, 5/5 events — through `browser`'s `test/runtime-differential.cljs`, against the engine this one would replace |
 | Capabilities | **none** — `kotoba -M check` reports `:effects #{}`, DOM bridge included. A write is a VALUE the host replays; the authority never leaves the host |
 | wasm32-browser | **35 KB, instantiates and runs** — this is the target that replaces the QuickJS blob |
@@ -182,9 +182,19 @@ than three.
 | `document` | `title`, `getElementById(id)` | `title` |
 | `console` | — | `log(…)` |
 | global | — | `setTimeout(fn, ms)`, `fetch(url)` |
+| `new Worker(url)` | — | `postMessage(m)`, `onmessage = fn` |
+| `new WebSocket(url)` | — | `send(m)`, `onmessage`/`onopen`/`onclose = fn` |
 
 That is the whole surface. Anything else is `undefined`, which a page script
 can test for — the same way it tests for a feature a browser does not have.
+
+`el.onclick = fn` is the property form of `addEventListener` and is reported
+as one, so the host has a single rule to replay. That rule lives in one
+function (`node-write`) because a node property is reachable by **two** paths
+— through the assignment parser (`w.onmessage = fn`) and through the postfix
+chain (`document.getElementById(x).onmessage = fn`) — and a rule written on
+only one of them holds half the time. Measured 2026-08-29: it did, and
+`onclick` registered while `w.onmessage` silently became a property write.
 
 ### Events
 

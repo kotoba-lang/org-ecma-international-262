@@ -153,6 +153,9 @@
             test-fetch-registration test-fetch-then-fires-with-the-response
             test-fetch-then-answers-the-request test-fetch-two-requests
             test-handler-argument-is-optional
+            test-new-worker test-new-websocket test-post-message test-socket-send
+            test-onmessage-registers test-onclick-registers
+            test-onmessage-fires-with-the-message test-on-non-function-is-a-write
             test-error-message test-error-name test-error-is-an-object
             test-thrown-value-is-not-wrapped test-type-error-name
             test-ternary-true test-ternary-false test-ternary-nested-in-arg
@@ -638,6 +641,10 @@
               ;; registry slot the host will fire.
               (string=? k "then")
               (if (str-starts-with? (r-s x) "#req") (builtin-r "then") (undef-r "" 0))
+              (string=? k "postMessage")
+              (if (str-starts-with? (r-s x) "#wrk") (builtin-r "postMessage") (undef-r "" 0))
+              (string=? k "send")
+              (if (str-starts-with? (r-s x) "#sock") (builtin-r "send") (undef-r "" 0))
               ;; Anything else is read from the node's own region, which is how
               ;; `document.title` works without a rule of its own.
               :else (member-get (dom-node-region (r-env x) (r-s x)) k))
@@ -1089,6 +1096,17 @@
 ;; The constructors this engine admits. There are no prototypes here, so
 ;; `new` is not general: an unknown constructor is refused by name rather
 ;; than silently producing an empty object.
+;; The two host constructors that answer a handle rather than a value. Both
+;; take a url and both are fired back through the registry, so they share the
+;; `fetch` shape exactly.
+(defn host-ctor? [nm :string] :i64
+  (cond (string=? nm "Worker") 1
+        (string=? nm "WebSocket") 1
+        :else 0))
+
+(defn host-ctor-prefix [nm :string] :string
+  (if (string=? nm "Worker") "#wrk" "#sock"))
+
 (defn error-ctor? [nm :string] :i64
   (cond
     (string=? nm "Error") 1
@@ -1108,6 +1126,25 @@
       (let [e (ident-end s j)
             nm (string-substring s j e)
             k (ws s e)]
+        (if (= (host-ctor? nm) 1)
+          ;; `new Worker(url)` / `new WebSocket(url)`: the same shape as
+          ;; `fetch`. What comes back is a handle under a reserved id, and the
+          ;; number in that id is the registry slot the host will fire.
+          (if (at? s k 40)
+            (let [args (ev-args-array s (+ k 1) env 0 "")]
+              (if (err? args)
+                args
+                (let [n (handler-count (r-env args))
+                      e (fx-append (env-set (r-env args) "%hn" (num-r (+ n 1) "" 0))
+                                   "#window" (string-concat "new" nm)
+                                   (string-concat
+                                    (fx-field (value-text (arr-at args 0)))
+                                    (fx-field (string-from-i64 n))))]
+                  (with-i (with-env (node-r (string-concat (host-ctor-prefix nm)
+                                                           (string-from-i64 n)))
+                                    e)
+                          (r-i args)))))
+            (err-r "TypeError: this constructor needs an argument" env k))
         (if (= (error-ctor? nm) 1)
           (if (at? s k 40)
             (let [args (ev-args-array s (+ k 1) env 0 "")]
@@ -1122,7 +1159,7 @@
                                                 "name" (str-r nm "" 0)) "")
                               env)
                     k))
-          (err-r "TypeError: unsupported constructor" env j)))
+          (err-r "TypeError: unsupported constructor" env j))))
       (err-r "SyntaxError: expected a constructor name after new" env j))))
 
 (defn ev-primary [s :string i0 :i64 env :string] [:ref :js/r]
@@ -1285,11 +1322,32 @@
 (defn req-number [id :string] :i64
   (r-n (scan-digits id 4 0)))
 
+  ;; `el.onclick = fn` is the property form of `addEventListener`, and a
+;; socket's `onmessage` is the same thing again. It is a REGISTRATION, not a
+;; write: the function goes into the registry, and what comes back names the
+;; node, the event type and the slot -- the same three fields
+;; `addEventListener` reports, so the host has one rule to replay.
+;;
+;; This lives in its own function because a node property is reachable by TWO
+;; paths -- `w.onmessage = fn` through the assignment parser, and
+;; `document.getElementById(x).onmessage = fn` through the postfix chain --
+;; and a rule written on only one of them is a rule that holds half the time.
+;; Measured 2026-08-29: it was, and `onclick` registered while `w.onmessage`
+;; silently became a property write.
+(defn node-write [nd [:ref :js/r] prop :string v [:ref :js/r]] :string
+  (if (if (str-starts-with? prop "on") (= (r-t v) :function) false)
+    (let [n (handler-count (r-env v))]
+      (fx-append (env-set (env-set (r-env v) (handler-name n) v)
+                          "%hn" (num-r (+ n 1) "" 0))
+                 (r-s nd) "addEventListener"
+                 (string-concat
+                  (fx-field (string-substring prop 2 (string-length prop)))
+                  (fx-field (string-from-i64 n)))))
+    (fx-append (r-env v) (r-s nd) prop (value-text v))))
+
 (defn node-assign [s :string i :i64 nd [:ref :js/r] prop :string] [:ref :js/r]
   (let [v (ev-expr s i (r-env nd))]
-    (if (err? v)
-      v
-      (with-env v (fx-append (r-env v) (r-s nd) prop (value-text v))))))
+    (if (err? v) v (with-env v (node-write nd prop v)))))
 
 ;; `node.prop op= E` reads through the snapshot, combines with `binop` (so
 ;; `+=` concatenates for the same reason it does on a variable), and records
@@ -1355,6 +1413,21 @@
       ;; function and cannot see its receiver.
       (at? s i 40)
       (cond
+        ;; Sending to a worker or a socket is an ordinary effect: the guest
+        ;; says what it wants sent and to which handle.
+        (if (= (r-t acc) :builtin)
+          (if (string=? (r-s acc) "postMessage") true (string=? (r-s acc) "send"))
+          false)
+        (let [args (ev-args-array s (+ i 1) (r-env acc) 0 "")]
+          (if (err? args)
+            args
+            (ev-postfix-rest
+             s (with-i (with-env (undef-r "" 0)
+                                 (fx-append (r-env args) (r-s recv) (r-s acc)
+                                            (value-text (arr-at args 0))))
+                       (r-i args))
+             (undef-r "" 0) "")))
+
         ;; `fetch` is the case that tests this whole design, because it
         ;; answers a PROMISE. What comes back here is a pending request --
         ;; a node under `#req<n>` -- and the number is the registry slot. The
@@ -1790,9 +1863,9 @@
               base
               (if (= (r-t base) :node)
                 ;; `el.textContent = v` where `el` is a variable holding a
-                ;; node: same rule as the chain form above.
-                (with-env v (fx-append (r-env v) (r-s base) (value-text k)
-                                       (value-text v)))
+                ;; node: the SAME rule as the chain form, through the same
+                ;; function, so the two paths cannot drift.
+                (with-env v (node-write base (value-text k) v))
               (let [updated (stored-with base (value-text k) v)]
                 (if (err? updated)
                   updated
@@ -3188,3 +3261,39 @@
                  0
                  "ignored")
                 "11:textContent1:a4:done") 1 0))
+
+;; --- workers and sockets --------------------------------------------------
+;; The same shape a third and fourth time: a handle under a reserved id, and
+;; the number in it is the registry slot.
+(defn test-new-worker []
+  (dom-is "var w = new Worker('/w.js');" (dom-entry "" "a" "")
+          "9:newWorker7:#window10:5:/w.js1:0"))
+(defn test-new-websocket []
+  (dom-is "var s = new WebSocket('ws://x');" (dom-entry "" "a" "")
+          "12:newWebSocket7:#window11:6:ws://x1:0"))
+(defn test-post-message []
+  (dom-is "var w = new Worker('/w.js'); w.postMessage('hi');" (dom-entry "" "a" "")
+          "9:newWorker7:#window10:5:/w.js1:011:postMessage5:#wrk02:hi"))
+(defn test-socket-send []
+  (dom-is "var s = new WebSocket('ws://x'); s.send('data');" (dom-entry "" "a" "")
+          "12:newWebSocket7:#window11:6:ws://x1:04:send6:#sock04:data"))
+;; `onmessage =` is the property form of addEventListener, and is reported as
+;; one, so the host has a single rule to replay.
+(defn test-onmessage-registers []
+  (dom-is "var w = new Worker('/w.js'); w.onmessage = function (e) { };"
+          (dom-entry "" "a" "")
+          "9:newWorker7:#window10:5:/w.js1:016:addEventListener5:#wrk012:7:message1:1"))
+(defn test-onclick-registers []
+  (dom-is "document.getElementById('a').onclick = function () { };" (dom-entry "" "a" "")
+          "16:addEventListener1:a10:5:click1:0"))
+(defn test-onmessage-fires-with-the-message []
+  (if (string=? (eval-dom-event-arg
+                 "var r = document.getElementById('a'); var w = new Worker('/w.js'); w.onmessage = function (e) { r.textContent = e; };"
+                 (dom-entry "" "a" "old")
+                 1
+                 "from the worker")
+                "11:textContent1:a15:from the worker") 1 0))
+;; A property starting with `on` that is NOT a function is still a write.
+(defn test-on-non-function-is-a-write []
+  (dom-is "document.getElementById('a').once = 'x';" (dom-entry "" "a" "")
+          "4:once1:a1:x"))
