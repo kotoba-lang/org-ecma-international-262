@@ -47,6 +47,7 @@
   ;; constraint), so a syntax or evaluation failure is a `:error` VALUE
   ;; carrying its message, and callers test for it.
   (:export [main eval-number eval-string eval-typeof eval-ok
+            eval-dom eval-dom-value dom-entry
             test-number test-arith test-precedence test-parens
             test-negative test-modulo test-division test-nested-parens
             test-string-literal test-string-concat test-string-number
@@ -117,6 +118,15 @@
             test-postfix-answers-the-old-value test-prefix-increment
             test-prefix-answers-the-new-value test-postfix-decrement
             test-compound-on-undeclared-throws
+            test-for-of-array test-for-of-sum test-for-of-empty
+            test-for-of-strings test-for-of-break test-for-of-not-an-array
+            test-for-in-object test-for-in-object-order test-for-in-array-indices
+            test-for-in-skips-reassigned-duplicates
+            test-dom-set-text test-dom-read-text test-dom-missing-id-is-null
+            test-dom-missing-id-is-falsy test-dom-via-a-variable
+            test-dom-compound-append test-dom-two-effects-keep-their-order
+            test-dom-no-effects-is-empty test-dom-writes-are-not-readable
+            test-dom-without-a-document
             test-error-message test-error-name test-error-is-an-object
             test-thrown-value-is-not-wrapped test-type-error-name
             test-ternary-true test-ternary-false test-ternary-nested-in-arg
@@ -280,6 +290,7 @@
         (= t :builtin) "B"
         (= t :object) "o"
         (= t :array) "a"
+        (= t :node) "N"
         :else "u"))
 
 (defn arr-join [x [:ref :js/r] i :i64 acc :string] :string
@@ -302,6 +313,7 @@
           (= t :undefined) "undefined"
           (= t :null) "null"
           (= t :error) (r-s x)
+          (= t :node) "[object HTMLElement]"
           :else "")))
 
 (defn stored-text [x [:ref :js/r]] :string
@@ -315,6 +327,11 @@
         ;; length-prefixed, so nesting one inside another needs no escaping.
         (= (r-t x) :object) (r-s x)
         (= (r-t x) :array) (r-s x)
+        ;; A node is stored as its element id -- the whole of what it is.
+        ;; Falling through to `value-text` here stored the RENDERING instead,
+        ;; so a node read back out of a variable pointed at an element called
+        ;; "[object HTMLElement]".
+        (= (r-t x) :node) (r-s x)
         :else (value-text x)))
 
 ;; BINDINGS map a name to a CELL id; CELLS map a cell id to a value. Both use
@@ -380,6 +397,7 @@
           (string=? tc "B") (builtin-r body)
           (string=? tc "o") (obj-r body env)
           (string=? tc "a") (arr-r body env)
+          (string=? tc "N") (node-r body)
           :else (undef-r env 0))))
 
 (defn entry-end [s :string i :i64] :i64
@@ -498,6 +516,48 @@
 ;; carry its own `indexOf` without the table shadowing it. An array's own
 ;; properties are decimal indices, so in practice only `length` collides and
 ;; it is answered above.
+;; --- host nodes ------------------------------------------------------------
+;;
+;; A `:node` is a HANDLE, not a DOM element: it carries an element id and
+;; nothing else. The guest never touches the document. It reads from a
+;; snapshot the host injected and, to write, appends to an effect log the host
+;; drains afterwards -- `state + event -> next-state + effects`, the contract
+;; ADR-2607201300 / ADR-2608261100 already draw for `kotoba/app`.
+;;
+;; That is why `kotoba -M check` still reports `:effects #{}` with a DOM
+;; binding in place: an effect here is a VALUE, and the authority to perform
+;; it stays with the host. It is also why `browser.runtime/ecma262` declares
+;; `:imports #{}` -- there is nothing to import.
+;;
+;; The snapshot and the log live under `%dom` and `%fx`, names no JavaScript
+;; identifier can spell, so no page script can reach or shadow them.
+(defn node-r [id :string] [:ref :js/r]
+  (record-new [:ref :js/r] :node 0 id "" 0 0))
+
+(defn dom-snapshot [env :string] :string
+  (let [d (env-get env "%dom")] (if (err? d) "" (r-s d))))
+
+(defn fx-field [v :string] :string
+  (string-concat (string-from-i64 (string-length v)) (string-concat ":" v)))
+
+;; Appended, never prepended: the host must replay these in the order the
+;; script asked for them.
+(defn fx-append [env :string id :string prop :string v :string] :string
+  (let [cur (env-get env "%fx")
+        text (if (err? cur) "" (r-s cur))]
+    (env-set env "%fx"
+             (str-r (string-concat text
+                                   (string-concat (fx-field prop)
+                                                  (string-concat (fx-field id)
+                                                                 (fx-field v))))
+                    "" 0))))
+
+;; The snapshot maps element id -> textContent, in the same length-prefixed
+;; entry format the environment uses, so building one costs nothing new.
+(defn dom-text [env :string id :string] :string
+  (let [v (member-get (dom-snapshot env) id)]
+    (if (= (r-t v) :undefined) "" (value-text v))))
+
 (defn member-of [x [:ref :js/r] k :string] [:ref :js/r]
   (cond (= (r-t x) :array)
         (cond (string=? k "length") (num-r (arr-len x) "" 0)
@@ -514,6 +574,19 @@
         (cond (string=? k "length") (num-r (string-length (r-s x)) "" 0)
               (string-method? k) (builtin-r k)
               :else (undef-r "" 0))
+
+        ;; A node's properties are read from the snapshot, so a read is
+        ;; still a pure function of (source, snapshot).
+        (= (r-t x) :node)
+        (cond (string=? k "textContent") (str-r (dom-text (r-env x) (r-s x)) "" 0)
+              (string=? k "id") (str-r (r-s x) "" 0)
+              :else (undef-r "" 0))
+
+        ;; `document` is a builtin whose properties are its methods.
+        (if (= (r-t x) :builtin) (string=? (r-s x) "document") false)
+        (if (string=? k "getElementById")
+          (builtin-r "getElementById")
+          (undef-r "" 0))
 
         (err? x) x
 
@@ -541,6 +614,7 @@
           (= t :builtin) true
           (= t :object) true
           (= t :array) true
+          (= t :node) true
           (= t :undefined) false
           (= t :null) false
           (= t :error) false
@@ -557,6 +631,7 @@
           (= t :builtin) "function"
           (= t :object) "object"
           (= t :array) "object"
+          (= t :node) "object"
           :else "error")))
 
 (defn cmp-str [a :string b :string i :i64] :i64
@@ -1117,6 +1192,31 @@
 ;; builds a new array and writes it back to the CELL `a` names. Because a cell
 ;; is shared, that write is seen through every closure over `a` -- which is
 ;; why push could not exist before capture became by reference.
+;; Writing a property of a host node is an EFFECT, not a rebinding: the value
+;; is recorded for the host and the guest's own environment is unchanged apart
+;; from the log. An assignment's value is the assigned value, as in JavaScript.
+(defn node-assign [s :string i :i64 nd [:ref :js/r] prop :string] [:ref :js/r]
+  (let [v (ev-expr s i (r-env nd))]
+    (if (err? v)
+      v
+      (with-env v (fx-append (r-env v) (r-s nd) prop (value-text v))))))
+
+;; `node.prop op= E` reads through the snapshot, combines with `binop` (so
+;; `+=` concatenates for the same reason it does on a variable), and records
+;; the RESULT. The snapshot is not updated: a later read in the same script
+;; still sees what the host injected, which is the honest answer for a guest
+;; that cannot see the host's document.
+(defn node-compound [s :string a :i64 nd [:ref :js/r] prop :string] [:ref :js/r]
+  (let [cur (member-of nd prop)
+        v (ev-expr s (+ a 2) (r-env nd))]
+    (if (err? v)
+      v
+      (let [nu (binop (compound-op s a) cur v)]
+        (if (err? nu)
+          nu
+          (with-i (with-env nu (fx-append (r-env v) (r-s nd) prop (value-text nu)))
+                  (r-i v)))))))
+
 (defn ev-postfix-rest [s :string acc [:ref :js/r] recv [:ref :js/r] bname :string]
   [:ref :js/r]
   (let [i (ws s (r-i acc))]
@@ -1124,10 +1224,28 @@
       (at? s i 46)
       (let [j (ws s (+ i 1))]
         (if (ident-start-cp? (cp s j))
-          (let [e (ident-end s j)]
-            (ev-postfix-rest s (joined (member-of acc (string-substring s j e))
-                                       (with-i acc e))
-                             acc bname))
+          (let [e (ident-end s j)
+                a (ws s e)]
+            (cond
+              ;; `<chain>.prop = E` where the chain ended at a host node. This
+              ;; sits HERE, rather than in the assignment parser, because by
+              ;; the time the chain has been walked the node is already in
+              ;; hand -- which makes `document.getElementById('x').textContent
+              ;; = v` and `el.textContent = v` the same rule.
+              (if (= (r-t acc) :node)
+                (if (= (cp s a) 61) (not (= (cp s (+ a 1)) 61)) false)
+                false)
+              (node-assign s (+ a 1) acc (string-substring s j e))
+
+              ;; `<chain>.prop op= E`, the form the demo's own listeners use
+              ;; (`result.textContent += ' + handler B fired'`).
+              (if (= (r-t acc) :node) (> (compound-op s a) 0) false)
+              (node-compound s a acc (string-substring s j e))
+
+              :else
+              (ev-postfix-rest s (joined (member-of acc (string-substring s j e))
+                                         (with-i acc e))
+                               acc bname)))
           (err-r "SyntaxError: expected a property name after ." (r-env acc) j)))
 
       (at? s i 91)
@@ -1147,6 +1265,23 @@
       ;; function and cannot see its receiver.
       (at? s i 40)
       (cond
+        ;; The one host call this slice admits. A missing id answers `null`,
+        ;; as a real document does, so `if (el)` is a real guard.
+        (if (= (r-t acc) :builtin) (string=? (r-s acc) "getElementById") false)
+        (let [args (ev-args-array s (+ i 1) (r-env acc) 0 "")]
+          (if (err? args)
+            args
+            (let [id (value-text (arr-at args 0))]
+              (ev-postfix-rest
+               s
+               (with-i (with-env (if (= (r-t (member-get (dom-snapshot (r-env args)) id))
+                                        :undefined)
+                                   (null-r "" 0)
+                                   (node-r id))
+                                 (r-env args))
+                       (r-i args))
+               (undef-r "" 0) ""))))
+
         (if (= (r-t acc) :builtin) (string=? (r-s acc) "push") false)
         (let [args (ev-args-array s (+ i 1) (r-env acc) 0 "")]
           (if (err? args)
@@ -1410,10 +1545,15 @@
           (let [base (env-get (r-env v) name)]
             (if (err? base)
               base
+              (if (= (r-t base) :node)
+                ;; `el.textContent = v` where `el` is a variable holding a
+                ;; node: same rule as the chain form above.
+                (with-env v (fx-append (r-env v) (r-s base) (value-text k)
+                                       (value-text v)))
               (let [updated (stored-with base (value-text k) v)]
                 (if (err? updated)
                   updated
-                  (with-env v (env-set (r-env v) name updated)))))))))))
+                  (with-env v (env-set (r-env v) name updated))))))))))))
 
 ;; `x += E`, `x++`, `++x`. Real page scripts are written with these -- every
 ;; `for` loop in the browser demo's own <script> tags uses `i++` -- while
@@ -1607,6 +1747,114 @@
         (= (cp s i) 41) (if (<= depth 1) i (close-paren s (+ i 1) (- depth 1)))
         :else (close-paren s (+ i 1) depth)))
 
+;; --- for...of / for...in ---------------------------------------------------
+;;
+;; Both share `for (`'s opening with the C-style form; what tells them apart is
+;; the word `of` or `in` where the C-style form has its first `;`. So the
+;; statement parser asks this first, and falls through to `ex-for` when the
+;; answer is 0.
+;;
+;; 1 = `of` (values), 2 = `in` (keys), 0 = neither.
+(defn forin-kind [s :string j :i64] :i64
+  (let [a (ws s j)
+        b (if (word? s a "var") (ws s (+ a 3))
+            (if (word? s a "let") (ws s (+ a 3))
+              (if (word? s a "const") (ws s (+ a 5)) a)))]
+    (if (ident-start-cp? (cp s b))
+      (let [k (ws s (ident-end s b))]
+        (cond (word? s k "of") 1
+              (word? s k "in") 2
+              :else 0))
+      0)))
+
+;; The loop variable's name, given the same starting position.
+(defn forin-name [s :string j :i64] :string
+  (let [a (ws s j)
+        b (if (word? s a "var") (ws s (+ a 3))
+            (if (word? s a "let") (ws s (+ a 3))
+              (if (word? s a "const") (ws s (+ a 5)) a)))]
+    (string-substring s b (ident-end s b))))
+
+;; Where the iterated expression starts: just past `of` (2) or `in` (2).
+(defn forin-expr-at [s :string j :i64] :i64
+  (let [a (ws s j)
+        b (if (word? s a "var") (ws s (+ a 3))
+            (if (word? s a "let") (ws s (+ a 3))
+              (if (word? s a "const") (ws s (+ a 5)) a)))]
+    (ws s (+ (ws s (ident-end s b)) 2))))
+
+;; An object's keys, oldest first and without duplicates, one per line.
+;;
+;; Entries are PREPENDED, so a walk gives newest first and a re-assigned key
+;; appears twice. Building the tail before the head reverses that, and a key
+;; already present in the (older) tail is skipped -- which keeps the position
+;; of the FIRST assignment, the order a real engine enumerates in.
+(defn key-lines [text :string i :i64] :string
+  (if (>= i (string-length text))
+    ""
+    (let [e (eq-at text i)]
+      (if (< e 0)
+        ""
+        (let [name (string-substring text i e)
+              rest (key-lines text (entry-end text (+ e 1)))]
+          (if (string-contains? rest (string-concat name "\n"))
+            rest
+            (string-concat rest (string-concat name "\n"))))))))
+
+;; One step of a `for (x of xs)` over an array.
+(defn ex-forof [s :string bi :i64 xs [:ref :js/r] i :i64 st [:ref :js/r]]
+  [:ref :js/r]
+  (if (>= i (arr-len xs))
+    (undef-r (r-env st) (skip-stmt s bi))
+    (let [b (ex-stmt s bi (env-put (r-env st) (r-s st) (arr-at xs i)))]
+      (cond (err? b) b
+            (= (r-sig b) 1) b
+            (= (r-sig b) 4) (undef-r (r-env b) (skip-stmt s bi))
+            :else (ex-forof s bi xs (+ i 1) (with-env st (r-env b)))))))
+
+;; One step of a `for (k in o)` over the newline-separated key list.
+(defn ex-forin [s :string bi :i64 keys :string st [:ref :js/r] name :string]
+  [:ref :js/r]
+  (let [nl (str-index-of keys "\n" 0)]
+    (if (< nl 0)
+      (undef-r (r-env st) (skip-stmt s bi))
+      (let [k (string-substring keys 0 nl)
+            rest (string-substring keys (+ nl 1) (string-length keys))
+            b (ex-stmt s bi (env-put (r-env st) name (str-r k "" 0)))]
+        (cond (err? b) b
+              (= (r-sig b) 1) b
+              (= (r-sig b) 4) (undef-r (r-env b) (skip-stmt s bi))
+              :else (ex-forin s bi rest (with-env st (r-env b)) name))))))
+
+;; `for (x of xs)` / `for (k in o)`. The iterated expression is evaluated ONCE,
+;; like a real engine: mutating the array inside the body does not re-read it.
+(defn ex-for-each [s :string j :i64 env :string] [:ref :js/r]
+  (let [kind (forin-kind s (+ j 1))
+        name (forin-name s (+ j 1))
+        x (ev-expr s (forin-expr-at s (+ j 1)) env)]
+    (if (err? x)
+      x
+      (let [close (ws s (r-i x))]
+        (if (at? s close 41)
+          (let [bi (+ close 1)]
+            (cond
+              (= kind 1)
+              (if (= (r-t x) :array)
+                (ex-forof s bi x 0 (str-r name (r-env x) 0))
+                (err-r "TypeError: for...of needs an array" (r-env x) close))
+
+              ;; `for...in` over an array yields its INDICES as strings, which
+              ;; is what a real engine does and the reason it is not a way to
+              ;; walk values.
+              (= (r-t x) :object)
+              (ex-forin s bi (key-lines (r-s x) 0) (undef-r (r-env x) 0) name)
+
+              (= (r-t x) :array)
+              (ex-forin s bi (key-lines (arr-entries x) 0) (undef-r (r-env x) 0) name)
+
+              :else (undef-r (r-env x) (skip-stmt s bi))))
+          (err-r "SyntaxError: expected ) after for...of" (r-env x) close))))))
+
 ;; The three clauses are found once and then re-read: the condition and the
 ;; update are expressions at fixed indices and the body is a statement at a
 ;; fixed index, exactly like `while`'s body. There is no separate loop scope,
@@ -1770,14 +2018,16 @@
       (word? s i "for")
       (let [j (ws s (+ i 3))]
         (if (at? s j 40)
-          (let [ini (ex-stmt s (+ j 1) env)]
+          (if (> (forin-kind s (+ j 1)) 0)
+            (ex-for-each s j env)
+            (let [ini (ex-stmt s (+ j 1) env)]
             (if (err? ini)
               ini
               (let [semi (find-semi s (r-i ini) 0)
                     close (close-paren s j 0)]
                 (if (if (< semi 0) true (< close 0))
                   (err-r "SyntaxError: a for statement needs init; condition; update" env j)
-                  (ex-for s (r-i ini) (+ semi 1) (+ close 1) (r-env ini))))))
+                  (ex-for s (r-i ini) (+ semi 1) (+ close 1) (r-env ini)))))))
           (err-r "SyntaxError: expected ( after for" env j)))
 
       (word? s i "while")
@@ -1882,6 +2132,31 @@
 (defn eval-string [src :string] :string (value-text (run src)))
 (defn eval-typeof [src :string] :string (type-name (run src)))
 (defn eval-ok [src :string] :i64 (if (err? (run src)) 0 1))
+
+;; --- the DOM entry point ---------------------------------------------------
+;;
+;; `dom` is a snapshot the HOST built: element id -> textContent, in the same
+;; length-prefixed entry format the environment uses (`dom-entry` builds one).
+;; The answer is the effect log, which the host replays. Nothing else crosses.
+(defn dom-env [dom :string] :string
+  (env-put (env-put (env-put "" "%dom" (str-r dom "" 0))
+                    "%fx" (str-r "" "" 0))
+           "document" (builtin-r "document")))
+
+(defn dom-entry [region :string id :string text :string] :string
+  (entry-put region id (str-r text "" 0)))
+
+(defn eval-dom [src :string dom :string] :string
+  (let [r (ex-seq src 0 (undef-r (hoist src 0 (dom-env dom)) 0) -1)]
+    (if (err? r)
+      (string-concat "ERROR " (r-s r))
+      (let [fx (env-get (r-env r) "%fx")]
+        (if (err? fx) "" (r-s fx))))))
+
+;; What the guest would read back, for tests and for a host that wants to
+;; check its own snapshot round-trips.
+(defn eval-dom-value [src :string dom :string] :string
+  (value-text (ex-seq src 0 (undef-r (hoist src 0 (dom-env dom)) 0) -1)))
 
 ;; ---------------------------------------------------------------------------
 ;; tests -- each runs on :jvm-kir, restricted ESM and wasm32
@@ -2231,3 +2506,73 @@
 (defn test-postfix-decrement [] (num-is "var x = 5; x--; x" 4))
 (defn test-compound-on-undeclared-throws []
   (str-is "try { nope += 1; 'no-throw' } catch (e) { e.name }" "ReferenceError"))
+
+;; --- for...of / for...in --------------------------------------------------
+(defn test-for-of-array []
+  (str-is "var out = ''; for (var x of [1, 2, 3]) { out = out + x; } out" "123"))
+(defn test-for-of-sum []
+  (num-is "var t = 0; for (var x of [4, 5, 6]) { t += x; } t" 15))
+(defn test-for-of-empty []
+  (str-is "var out = 'n'; for (var x of []) { out = 'y'; } out" "n"))
+(defn test-for-of-strings []
+  (str-is "var out = ''; for (var s of ['a', 'b']) { out += s; } out" "ab"))
+(defn test-for-of-break []
+  (num-is "var t = 0; for (var x of [1, 2, 3, 4]) { if (x == 3) { break; } t += x; } t" 3))
+(defn test-for-of-not-an-array []
+  (str-is "try { for (var x of 5) { } 'no-throw' } catch (e) { e.name }" "TypeError"))
+;; `for...in` yields KEYS, oldest first, without duplicates.
+(defn test-for-in-object []
+  (str-is "var o = {a: 1, b: 2}; var out = ''; for (var k in o) { out += k; } out" "ab"))
+(defn test-for-in-object-order []
+  (str-is "var o = {}; o.x = 1; o.y = 2; o.z = 3; var out = ''; for (var k in o) { out += k; } out" "xyz"))
+(defn test-for-in-array-indices []
+  (str-is "var out = ''; for (var i in ['a', 'b']) { out += i; } out" "01"))
+(defn test-for-in-skips-reassigned-duplicates []
+  (str-is "var o = {a: 1, b: 2}; o.a = 9; var out = ''; for (var k in o) { out += k; } out" "ab"))
+
+;; --- the DOM bridge -------------------------------------------------------
+;; The log is <proplen>:<prop><idlen>:<id><vallen>:<value>, appended in order.
+(defn dom-is [src :string dom :string want :string] :i64
+  (if (string=? (eval-dom src dom) want) 1 0))
+
+(defn test-dom-set-text []
+  (dom-is "document.getElementById('ws-proof').textContent = 'hello';"
+          (dom-entry "" "ws-proof" "")
+          "11:textContent8:ws-proof5:hello"))
+(defn test-dom-read-text []
+  (if (string=? (eval-dom-value "document.getElementById('t').textContent"
+                                (dom-entry "" "t" "abc"))
+                "abc") 1 0))
+;; A missing id answers null, as a real document does.
+(defn test-dom-missing-id-is-null []
+  (if (string=? (eval-dom-value "document.getElementById('nope')"
+                                (dom-entry "" "t" "abc"))
+                "null") 1 0))
+(defn test-dom-missing-id-is-falsy []
+  (if (string=? (eval-dom-value "document.getElementById('nope') ? 'y' : 'n'"
+                                (dom-entry "" "t" "abc"))
+                "n") 1 0))
+(defn test-dom-via-a-variable []
+  (dom-is "var el = document.getElementById('t'); el.textContent = 'z';"
+          (dom-entry "" "t" "")
+          "11:textContent1:t1:z"))
+(defn test-dom-compound-append []
+  (dom-is "document.getElementById('t').textContent += 'B';"
+          (dom-entry "" "t" "A")
+          "11:textContent1:t2:AB"))
+(defn test-dom-two-effects-keep-their-order []
+  (dom-is "document.getElementById('a').textContent = '1'; document.getElementById('b').textContent = '2';"
+          (dom-entry (dom-entry "" "a" "") "b" "")
+          "11:textContent1:a1:111:textContent1:b1:2"))
+(defn test-dom-no-effects-is-empty []
+  (dom-is "1 + 1" (dom-entry "" "t" "") ""))
+;; The guest cannot see its own writes: the snapshot is what the host injected
+;; and this engine does not pretend to have applied anything.
+(defn test-dom-writes-are-not-readable []
+  (if (string=? (eval-dom-value "var el = document.getElementById('t'); el.textContent = 'new'; el.textContent"
+                                (dom-entry "" "t" "old"))
+                "old") 1 0))
+;; Without a document binding the name is simply unresolvable, so a page
+;; script's feature detection still works.
+(defn test-dom-without-a-document []
+  (str-is "typeof document" "undefined"))

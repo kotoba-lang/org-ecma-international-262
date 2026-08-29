@@ -20,12 +20,12 @@ page <script> text ──runtime input──┐
 
 | | |
 |---|---|
-| Language | expressions, `var`/`let`/`const`, assignment, **compound assignment** (`+=` `-=` `*=` `/=` `%=`) and **`++`/`--`** (prefix and postfix), `if`/`else`, ternary `?:`, `while`, `for`, `break`/`continue`, blocks, **functions** (declarations, function expressions incl. named and immediate, parameters, `return`, recursion, mutual recursion, hoisting), **closures** (capture by reference), **arrays and objects** (literals, `.k`, `[k]`, `.length`, member assignment, nesting), **method calls** and `this`, **builtins** (`push`/`pop`/`filter`/`map`/`forEach`/`join`/`indexOf`/`includes`/`slice`; `charAt`/`indexOf`/`substring`/`toLowerCase`/`toUpperCase`/`split`/`includes`), **`throw`/`try`/`catch`/`finally`** with real `Error` objects and **`new Error(...)`**, `typeof` (including the spec's unresolvable reference, so `typeof window` is `undefined` rather than an error), short-circuit `&&`/`||`, comments |
-| Not yet | prototypes and `instanceof`, `for...in`/`of`, `switch`, IEEE-754 numbers (integers only) — see Gaps |
-| Own tests | **203/203 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host, run in chunks) and on the restricted-ESM artifact |
+| Language | expressions, `var`/`let`/`const`, assignment, **compound assignment** (`+=` `-=` `*=` `/=` `%=`) and **`++`/`--`** (prefix and postfix), `if`/`else`, ternary `?:`, `while`, `for`, **`for...of`** and **`for...in`**, `break`/`continue`, blocks, **functions** (declarations, function expressions incl. named and immediate, parameters, `return`, recursion, mutual recursion, hoisting), **closures** (capture by reference), **arrays and objects** (literals, `.k`, `[k]`, `.length`, member assignment, nesting), **method calls** and `this`, **builtins** (`push`/`pop`/`filter`/`map`/`forEach`/`join`/`indexOf`/`includes`/`slice`; `charAt`/`indexOf`/`substring`/`toLowerCase`/`toUpperCase`/`split`/`includes`), **`throw`/`try`/`catch`/`finally`** with real `Error` objects and **`new Error(...)`**, `typeof` (including the spec's unresolvable reference, so `typeof window` is `undefined` rather than an error), short-circuit `&&`/`||`, comments |
+| Not yet | prototypes and `instanceof`, `switch`, IEEE-754 numbers (integers only), host objects beyond `document.getElementById` — see Gaps |
+| Own tests | **223/223 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host, run in chunks) and on the restricted-ESM artifact |
 | Differential | **220/221 agree with a real host V8** (1 recorded divergence), and **35/35 agree with quickjs-ng** — the engine this one would replace — through `browser`'s `test/runtime-differential.cljs` |
-| Capabilities | **none** — `kotoba -M check` reports `:effects #{}`. A pure interpreter asks the host for nothing |
-| wasm32-browser | **26 KB, instantiates and runs** — this is the target that replaces the QuickJS blob |
+| Capabilities | **none** — `kotoba -M check` reports `:effects #{}`, DOM bridge included. A write is a VALUE the host replays; the authority never leaves the host |
+| wasm32-browser | **32 KB, instantiates and runs** — this is the target that replaces the QuickJS blob |
 
 ## Build and test
 
@@ -118,6 +118,48 @@ only the two simplest tests pass at that setting.
   admitted; shifts are not, and are `*`/`quot` by powers of two).
 - **Source is treated as ASCII.** `string-length` counts code points while
   `string-substring` takes byte boundaries; they agree only for ASCII.
+
+## The DOM bridge
+
+A page script is only useful if it can change the page, and this engine has no
+capabilities at all. Both are true at once because a write is not performed —
+it is **returned**:
+
+```
+host: snapshot (element id -> textContent)  ──┐
+                                              ▼
+              eval-dom(source, snapshot) ──> effect log ──> host replays it
+```
+
+That is the shape `kotoba/app` already draws for this workspace
+(`state + event -> next-state + inert effects`, ADR-2607201300 / ADR-2608261100).
+It is why `kotoba -M check` still answers `:effects #{}` with `document` bound,
+and why `browser.runtime/ecma262` declares `:imports #{}` — there is nothing
+to import.
+
+```js
+document.getElementById('ws-proof').textContent = 'done';
+```
+
+```
+11:textContent8:ws-proof4:done
+```
+
+The log is `<len>:<prop><len>:<id><len>:<value>`, appended in order, so the
+host replays exactly what the script asked for, in the order it asked.
+
+- **Reads come from the snapshot, and a write does not change it.** A script
+  that sets `textContent` and reads it back sees what the host injected. That
+  is the honest answer for a guest that cannot see the host's document, and it
+  is what `+=` composes against.
+- `getElementById` of an unknown id answers `null`, as a real document does,
+  so `if (el)` is a real guard.
+- `%dom` and `%fx` hold the snapshot and the log. No JavaScript identifier can
+  spell those names, so no page script can reach or shadow them.
+- **The bridge is measured against quickjs-ng**, not against a recorded
+  string: `browser`'s `test/runtime-differential.cljs` gives the real engine a
+  `document` shim whose setter writes the same log format, and compares the
+  two logs.
 
 ## Why this repo is named this way
 
