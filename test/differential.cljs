@@ -93,7 +93,32 @@
    "var g = 6; function f() { return g + 1; } f()"
    "function f() { return 3; } f(); 42"
    "function sum(n) { var t = 0; var i = 1; while (i <= n) { t = t + i; i = i + 1; } return t; } sum(10)"
-   "function outer(n) { return inner(n) + 1; } function inner(n) { return n * 10; } outer(2)"])
+   "function outer(n) { return inner(n) + 1; } function inner(n) { return n * 10; } outer(2)"
+   ;; arrays and objects
+   "var a = [10, 20, 30]; a[1]"
+   "var a = [1, 2, 3]; a[0] + a[2]"
+   "var a = [1, 2, 3, 4]; a.length"
+   "var a = [1, 2, 3]; a[1] = 9; a[1]"
+   "var a = [1]; a[3] = 7; a.length"
+   "var a = ['x', 'y']; a[0] + a[1]"
+   "var a = [1, 2, 3, 4]; var i = 0; var t = 0; while (i < a.length) { t = t + a[i]; i = i + 1; } t"
+   "var a = []; a.length"
+   "var a = [[1, 2], [3, 4]]; a[1][0]"
+   "var o = {a: 1, b: 2}; o.b"
+   "var o = {x: 5}; o['x']"
+   "var o = {x: 1}; o.x = 8; o.x"
+   "var o = {}; o.fresh = 3; o.fresh"
+   "var o = {a: 1}; typeof o.nope"
+   "var o = {inner: {deep: 6}}; o.inner.deep"
+   "var a = [{v: 1}, {v: 2}]; a[1].v"
+   "var o = {items: [4, 5, 6]}; o.items[2]"
+   "typeof {a: 1}"
+   "typeof [1]"
+   "'hello'.length"
+   "'' + [1, 2, 3]"
+   "'' + {a: 1}"
+   "function pair(a, b) { return [a, b]; } pair(3, 4)[1]"
+   "function f() { return 1; } var o = {g: f}; typeof o.g"])
 
 (def known-divergences
   "Cases where this engine and a real one genuinely disagree, each with the

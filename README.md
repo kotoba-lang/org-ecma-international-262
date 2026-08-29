@@ -20,12 +20,12 @@ page <script> text ──runtime input──┐
 
 | | |
 |---|---|
-| Language | expressions, `var`/`let`/`const`, assignment, `if`/`else`, `while`, blocks, **functions** (declaration, parameters, `return`, recursion, mutual recursion, hoisting), `typeof`, comments, string/number/boolean/undefined/null/function |
-| Not yet | objects, arrays, `for`, `try`, closures, prototypes — see Gaps |
-| Own tests | **64/64 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host) and on the restricted-ESM artifact |
-| Differential | **72/73 agree with a real host V8**, 1 recorded divergence (`test/differential.cljs`) |
+| Language | expressions, `var`/`let`/`const`, assignment, `if`/`else`, `while`, blocks, **functions** (declaration, parameters, `return`, recursion, mutual recursion, hoisting), **arrays and objects** (literals, `.k`, `[k]`, `.length`, member assignment, nesting), `typeof`, comments, string/number/boolean/undefined/null/function/object |
+| Not yet | `for`, `try`, closures, prototypes, methods (`o.f()`), array builtins — see Gaps |
+| Own tests | **89/89 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host) and on the restricted-ESM artifact |
+| Differential | **96/97 agree with a real host V8**, 1 recorded divergence (`test/differential.cljs`) |
 | Capabilities | **none** — `kotoba -M check` reports `:effects #{}`. A pure interpreter asks the host for nothing |
-| wasm32-browser | **20 KB, instantiates and runs** — this is the target that replaces the QuickJS blob |
+| wasm32-browser | **26 KB, instantiates and runs** — this is the target that replaces the QuickJS blob |
 
 ## Build and test
 
@@ -76,6 +76,15 @@ only the two simplest tests pass at that setting.
 - **The environment is a string.** Same cause: a record holding both a value
   and a collection blows the same 64-node budget, and a typed map holds 31
   entries. Entries are length-prefixed and prepended, so lookup is a scan.
+- **A member assignment's base must be a plain identifier.** Values are
+  persistent, so `a[0] = 5` builds a new array and rebinds the NAME; a deeper
+  path (`o.a.b = 1`) would have to rebuild every container along it. `o.a.b`
+  READS fine — only assignment is restricted.
+- **Objects and arrays share the environment's own entry format.** An object
+  is a scope whose names happen to be properties, and an array is an object
+  keyed by decimal index with its length carried in front. Entries are
+  length-prefixed, so nesting one inside another needs no escaping. Lookup is
+  a scan, and a property write prepends rather than rewrites.
 - **Functions have no closures.** The callee's environment is seeded from the
   caller's, which is dynamic scope. Declarations, recursion, mutual recursion,
   hoisting and globals all work; a function returned from another function and
