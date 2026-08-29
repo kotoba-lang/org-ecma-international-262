@@ -22,10 +22,10 @@ page <script> text ──runtime input──┐
 |---|---|
 | Language | expressions, `var`/`let`/`const`, assignment, `if`/`else`, `while`, blocks, `typeof`, comments, string/number/boolean/undefined/null |
 | Not yet | functions, objects, arrays, `for`, `try`, closures, prototypes — see Gaps |
-| Own tests | 48, all passing on the **restricted-ESM** artifact (`instantiateKotoba`, run under node) |
+| Own tests | **48/48 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host) and on the restricted-ESM artifact |
 | Differential | **56/57 agree with a real host V8**, 1 recorded divergence (`test/differential.cljs`) |
 | Capabilities | **none** — `kotoba -M check` reports `:effects #{}`. A pure interpreter asks the host for nothing |
-| wasm32-browser | compiles (16 KB) but the emitted module **does not instantiate** — an amu backend defect, see Gaps |
+| wasm32-browser | **16 KB, instantiates and runs** — this is the target that replaces the QuickJS blob |
 
 ## Build and test
 
@@ -37,13 +37,19 @@ kotoba -M compile src/ecma262.kotoba --target js \
 nbb test/differential.cljs                               # vs the host engine
 ```
 
-`kotoba -M test` runs every `test-*` export on three targets at once, which is
-the right harness for this repo, but it **cannot complete today**: its wasm
-stage fails as a process because of the backend defect below, and the failure
-aborts the whole run rather than reporting the two targets that did work. So
-the 48 own tests are currently exercised through the compiled restricted-ESM
-artifact instead. The `:jvm-kir` figure is therefore **unmeasured for this
-engine** -- it was measured only for the small probes that led to it.
+```bash
+kotoba -M compile src/ecma262.kotoba --target wasm32-browser \
+  --fuel 200000000 --output target/ecma262.wasm
+```
+
+The wasm artifact is instantiated through `amu/runtime/browser-host.mjs`; its
+`test-*` exports are zero-arity and return 1 for pass, so the suite can be run
+directly against the module. All 48 pass there.
+
+`kotoba -M test` runs every `test-*` export on three targets in one pass, which
+is the right harness for this repo, but it does not complete on this engine
+yet, so the `:jvm-kir` figure is **unmeasured here** -- it was measured only
+for the small probes that led to this design.
 
 `--fuel` is not optional. The default budget is **512 operations for the life
 of an instance**, which a parser spends before it reaches the first statement;
@@ -51,13 +57,14 @@ only the two simplest tests pass at that setting.
 
 ## Gaps, with the condition that removes each
 
-- **wasm32-browser emits an invalid module.** `kotoba -M compile --target
-  wasm32-browser` reports `:ok true`, and the artifact fails to compile with
-  `function index #694 is out of bounds` in function #78. Small programs are
-  fine (a 60-line probe instantiates and runs), so this is triggered by scale
-  or shape, not by usage. **This is the one gap that blocks the whole point of
-  the repo** and is filed against amu. Until it lifts, the reference KIR and
-  restricted-ESM targets are where this engine actually runs.
+- ~~**wasm32-browser emits an invalid module.**~~ **Fixed 2026-08-29** in
+  `kotoba-lang/kotoba-wasm` (`a739f37`). The emitter wrote call operands as a
+  single byte, but a Wasm index is ULEB128, so any module with more than 128
+  functions was invalid -- a call to function 182 (`0xB6`) decoded as
+  `function index #694 is out of bounds`, which is 54 + (5 << 7): `0xB6`'s low
+  seven bits plus the following opcode. This engine is what first crossed 128
+  functions. `kotoba -M compile` reported `:ok true` throughout, which is the
+  expensive shape of the bug: the compiler said the build was fine.
 - **No AST.** The engine parses and evaluates in one pass and re-reads a loop
   body from its source index each iteration. That is not how an interpreter
   wants to be written; it is forced by two measured limits — a typed ADT value
