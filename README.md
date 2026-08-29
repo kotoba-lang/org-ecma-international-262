@@ -21,8 +21,8 @@ page <script> text ──runtime input──┐
 | | |
 |---|---|
 | Language | expressions, `var`/`let`/`const`, assignment, **compound assignment** (`+=` `-=` `*=` `/=` `%=`) and **`++`/`--`** (prefix and postfix), `if`/`else`, ternary `?:`, `while`, `for`, **`for...of`** and **`for...in`**, **`switch`** (with fallthrough), `break`/`continue`, blocks, **functions** (declarations, function expressions incl. named and immediate, parameters, `return`, recursion, mutual recursion, hoisting), **closures** (capture by reference), **arrays and objects** (literals, `.k`, `[k]`, `.length`, member assignment, nesting), **method calls** and `this`, **builtins** (`push`/`pop`/`filter`/`map`/`forEach`/`join`/`indexOf`/`includes`/`slice`; `charAt`/`indexOf`/`substring`/`toLowerCase`/`toUpperCase`/`split`/`includes`), **`throw`/`try`/`catch`/`finally`** with real `Error` objects and **`new Error(...)`**, `typeof` (including the spec's unresolvable reference, so `typeof window` is `undefined` rather than an error), short-circuit `&&`/`||`, comments |
-| Not yet | prototypes (`instanceof` answers without one — see Gaps), IEEE-754 numbers (integers only), host objects beyond the nine below |
-| Own tests | **262/262 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host, run in chunks) and on the restricted-ESM artifact |
+| Not yet | prototypes (`instanceof` answers without one — see Gaps), IEEE-754 numbers (integers only), host objects beyond the ten below |
+| Own tests | **267/267 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host, run in chunks) and on the restricted-ESM artifact |
 | Differential | **237/238 agree with a real host V8** (1 recorded divergence), and **62/63 agree with quickjs-ng** — 35/36 language, 22/22 DOM, 5/5 events — through `browser`'s `test/runtime-differential.cljs`, against the engine this one would replace |
 | Capabilities | **none** — `kotoba -M check` reports `:effects #{}`, DOM bridge included. A write is a VALUE the host replays; the authority never leaves the host |
 | wasm32-browser | **35 KB, instantiates and runs** — this is the target that replaces the QuickJS blob |
@@ -181,7 +181,7 @@ than three.
 | element | `textContent`, `getAttribute(n)` | `textContent`, `setAttribute(n, v)`, `addEventListener(type, fn)` |
 | `document` | `title`, `getElementById(id)` | `title` |
 | `console` | — | `log(…)` |
-| global | — | `setTimeout(fn, ms)` |
+| global | — | `setTimeout(fn, ms)`, `fetch(url)` |
 
 That is the whole surface. Anything else is `undefined`, which a page script
 can test for — the same way it tests for a feature a browser does not have.
@@ -204,6 +204,31 @@ document.getElementById('btn').addEventListener('click', function () {
 eval-dom       -> 16:addEventListener3:btn10:5:click1:0
 eval-dom-event(…, 0) -> 11:textContent3:out5:fired
 ```
+
+**`fetch` is the case that tests all of this**, because it answers a promise.
+What comes back is a *pending request* — a node under a `#req<n>` id, so it
+needed no new value type — and *n* is the registry slot. `.then(fn)` files the
+handler in that slot and answers the same request, so it chains. The host
+performs the request and fires the slot **with the response**, through
+`eval-dom-event-arg`:
+
+```
+eval-dom       -> 5:fetch7:#window14:9:/api/data1:0
+                  ( host fetches )
+eval-dom-event-arg(…, 0, "the body") -> 11:textContent3:out8:the body
+```
+
+That is the whole loop the effect model exists for, and it closes without a
+capability: the guest never touches the network, and the response is data the
+host hands back.
+
+Passing that response is the one place the obvious approach does not work.
+The value cannot be bound in the caller's environment before the call,
+because a declared parameter with no argument is bound to `undefined` — that
+is what makes `function f(a) { return typeof a }; f()` answer `"undefined"` —
+and that binding shadows anything outside. So it is bound *after* `bind-args`
+has run, which is also why that entry point spells the call out instead of
+delegating to `call-fn` (already at the language's five-parameter ceiling).
 
 `setTimeout` is the same shape and shares the same registry — it hands the
 host a function too, and a guest with no capabilities has no clock. Its

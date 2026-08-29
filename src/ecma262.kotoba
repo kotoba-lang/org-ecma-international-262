@@ -47,7 +47,7 @@
   ;; constraint), so a syntax or evaluation failure is a `:error` VALUE
   ;; carrying its message, and callers test for it.
   (:export [main eval-number eval-string eval-typeof eval-ok
-            eval-dom eval-dom-value eval-dom-event
+            eval-dom eval-dom-value eval-dom-event eval-dom-event-arg
             dom-entry dom-node dom-node-attr dom-node-prop dom-put
             test-number test-arith test-precedence test-parens
             test-negative test-modulo test-division test-nested-parens
@@ -150,6 +150,9 @@
             test-instanceof-new-error
             test-set-timeout-registration test-set-timeout-fires
             test-set-timeout-answers-an-id test-set-timeout-shares-the-registry
+            test-fetch-registration test-fetch-then-fires-with-the-response
+            test-fetch-then-answers-the-request test-fetch-two-requests
+            test-handler-argument-is-optional
             test-error-message test-error-name test-error-is-an-object
             test-thrown-value-is-not-wrapped test-type-error-name
             test-ternary-true test-ternary-false test-ternary-nested-in-arg
@@ -577,6 +580,10 @@
 
 ;; The snapshot maps element id -> textContent, in the same length-prefixed
 ;; entry format the environment uses, so building one costs nothing new.
+(defn str-starts-with? [t :string prefix :string] :bool
+  (let [m (string-length prefix)]
+    (if (< (string-length t) m) false (string=? (string-substring t 0 m) prefix))))
+
 (defn dom-node-region [env :string id :string] :string
   (let [v (member-get (dom-snapshot env) id)]
     (if (= (r-t v) :object) (r-s v) "")))
@@ -626,6 +633,11 @@
                 (undef-r "" 0))
               (string=? k "log")
               (if (string=? (r-s x) "#console") (builtin-r "log") (undef-r "" 0))
+              ;; A pending request is a node under a `#req<n>` id, so `.then`
+              ;; needs no new value type -- and the number in the id IS the
+              ;; registry slot the host will fire.
+              (string=? k "then")
+              (if (str-starts-with? (r-s x) "#req") (builtin-r "then") (undef-r "" 0))
               ;; Anything else is read from the node's own region, which is how
               ;; `document.title` works without a rule of its own.
               :else (member-get (dom-node-region (r-env x) (r-s x)) k))
@@ -1255,6 +1267,24 @@
 (defn handler-count [env :string] :i64
   (let [c (env-get env "%hn")] (if (err? c) 0 (r-n c))))
 
+;; --- handler arguments -----------------------------------------------------
+;;
+;; A fired handler often needs a VALUE it could not have had at registration
+;; time -- a fetch response, an event. `call-fn` takes its arguments from the
+;; SOURCE, and there is no source position holding a runtime value, so the
+;; value is bound under the handler's own first parameter name instead and the
+;; call is made with none. The capture tail makes it visible, which is the
+;; same mechanism that lets a function see a name declared later.
+(defn first-param-name [s :string f [:ref :js/r]] :string
+  (let [j (ws s (+ (fn-params-start f) 1))]
+    (if (ident-start-cp? (cp s j))
+      (string-substring s j (ident-end s j))
+      "")))
+
+;; The request number carried in a `#req<n>` node id.
+(defn req-number [id :string] :i64
+  (r-n (scan-digits id 4 0)))
+
 (defn node-assign [s :string i :i64 nd [:ref :js/r] prop :string] [:ref :js/r]
   (let [v (ev-expr s i (r-env nd))]
     (if (err? v)
@@ -1325,6 +1355,40 @@
       ;; function and cannot see its receiver.
       (at? s i 40)
       (cond
+        ;; `fetch` is the case that tests this whole design, because it
+        ;; answers a PROMISE. What comes back here is a pending request --
+        ;; a node under `#req<n>` -- and the number is the registry slot. The
+        ;; host performs the request and fires that slot with the response,
+        ;; which is why handlers had to learn to take an argument.
+        (if (= (r-t acc) :builtin) (string=? (r-s acc) "fetch") false)
+        (let [args (ev-args-array s (+ i 1) (r-env acc) 0 "")]
+          (if (err? args)
+            args
+            (let [n (handler-count (r-env args))
+                  e (fx-append (env-set (r-env args) "%hn" (num-r (+ n 1) "" 0))
+                               "#window" "fetch"
+                               (string-concat
+                                (fx-field (value-text (arr-at args 0)))
+                                (fx-field (string-from-i64 n))))]
+              (ev-postfix-rest
+               s (with-i (with-env (node-r (string-concat "#req" (string-from-i64 n))) e)
+                         (r-i args))
+               (undef-r "" 0) ""))))
+
+        ;; `.then(fn)` files the handler in the slot the request already
+        ;; claimed, and answers the same pending request so it can be chained.
+        (if (= (r-t acc) :builtin) (string=? (r-s acc) "then") false)
+        (let [args (ev-args-array s (+ i 1) (r-env acc) 0 "")]
+          (if (err? args)
+            args
+            (ev-postfix-rest
+             s (with-i (with-env recv
+                                 (env-set (r-env args)
+                                          (handler-name (req-number (r-s recv)))
+                                          (arr-at args 0)))
+                       (r-i args))
+             (undef-r "" 0) "")))
+
         ;; `setTimeout` is the same shape as `addEventListener`: it hands the
         ;; host a function to call later, so what comes back is the
         ;; REGISTRATION -- the delay and a handler number -- and firing it is
@@ -2418,11 +2482,12 @@
 ;; length-prefixed entry format the environment uses (`dom-entry` builds one).
 ;; The answer is the effect log, which the host replays. Nothing else crosses.
 (defn dom-env [dom :string] :string
-  (env-put (env-put (env-put (env-put (env-put "" "%dom" (str-r dom "" 0))
-                                      "%fx" (str-r "" "" 0))
+  (env-put (env-put (env-put (env-put (env-put (env-put "" "%dom" (str-r dom "" 0))
+                                               "%fx" (str-r "" "" 0))
                              "document" (node-r "#document"))
                     "console" (node-r "#console"))
-           "setTimeout" (builtin-r "setTimeout")))
+                    "setTimeout" (builtin-r "setTimeout"))
+           "fetch" (builtin-r "fetch")))
 
 (defn dom-node [text :string] :string
   (entry-put "" "textContent" (str-r text "" 0)))
@@ -2466,6 +2531,42 @@
               (string-concat "ERROR " (r-s out))
               (let [fx (env-get (r-env out) "%fx")]
                 (if (err? fx) "" (r-s fx))))))))))
+
+(defn eval-dom-event-arg [src :string dom :string n :i64 arg :string] :string
+  (let [r (ex-seq src 0 (undef-r (hoist src 0 (dom-env dom)) 0) -1)]
+    (if (err? r)
+      (string-concat "ERROR " (r-s r))
+      (let [env0 (env-set (r-env r) "%fx" (str-r "" "" 0))
+            f (env-get env0 (handler-name n))]
+        (if (err? f)
+          "ERROR ReferenceError: no such handler"
+          ;; The call is spelled out rather than delegated to `call-fn`,
+          ;; because the value has to be bound AFTER `bind-args` has run.
+          ;; Binding it in the caller's environment first does not work, and
+          ;; for a correct reason: a declared parameter with no argument is
+          ;; bound to `undefined` (that is what makes `function f(a) { return
+          ;; typeof a }; f()` answer "undefined"), and that binding shadows
+          ;; anything outside. `call-fn` already takes five parameters, the
+          ;; language's ceiling, so it cannot take a sixth.
+          (let [pname (first-param-name src f)
+                base (hoist src (+ (fn-body-start f) 1)
+                            (env-put (env-make (string-concat (fn-env f)
+                                                              (env-bindings env0))
+                                               (env-cells env0))
+                                     "this" (undef-r "" 0)))
+                bound (bind-args src (+ (fn-params-start f) 1)
+                                 (- (skip-params src (+ (fn-params-start f) 1)) 1)
+                                 env0 base)]
+            (if (err? bound)
+              (string-concat "ERROR " (r-s bound))
+              (let [env2 (if (string=? pname "")
+                           (r-s bound)
+                           (env-set (r-s bound) pname (str-r arg "" 0)))
+                    out (ex-stmt src (fn-body-start f) env2)]
+                (if (err? out)
+                  (string-concat "ERROR " (r-s out))
+                  (let [fx (env-get (r-env out) "%fx")]
+                    (if (err? fx) "" (r-s fx))))))))))))
 
 (defn eval-dom-value [src :string dom :string] :string
   (value-text (ex-seq src 0 (undef-r (hoist src 0 (dom-env dom)) 0) -1)))
@@ -3056,3 +3157,34 @@
                  (dom-entry "" "a" "now")
                  1)
                 "11:textContent1:a5:timer") 1 0))
+
+;; --- fetch ----------------------------------------------------------------
+;; The case that tests the whole design, because it answers a promise. What
+;; comes back is a pending request; the host performs it and fires the slot
+;; with the response, which is why a handler can take an argument at all.
+(defn test-fetch-registration []
+  (dom-is "fetch('/api/data');" (dom-entry "" "a" "")
+          "5:fetch7:#window14:9:/api/data1:0"))
+(defn test-fetch-then-fires-with-the-response []
+  (if (string=? (eval-dom-event-arg
+                 "var r = document.getElementById('a'); fetch('/api/data').then(function (body) { r.textContent = body; });"
+                 (dom-entry "" "a" "old")
+                 0
+                 "the response")
+                "11:textContent1:a12:the response") 1 0))
+;; `.then` answers the same pending request, so it can be chained.
+(defn test-fetch-then-answers-the-request []
+  (if (string=? (eval-dom-value "typeof fetch('/x').then(function (b) { })"
+                                (dom-entry "" "a" ""))
+                "object") 1 0))
+(defn test-fetch-two-requests []
+  (dom-is "fetch('/one'); fetch('/two');" (dom-entry "" "a" "")
+          "5:fetch7:#window9:4:/one1:05:fetch7:#window9:4:/two1:1"))
+;; A handler that declares no parameter is called anyway.
+(defn test-handler-argument-is-optional []
+  (if (string=? (eval-dom-event-arg
+                 "var r = document.getElementById('a'); fetch('/x').then(function () { r.textContent = 'done'; });"
+                 (dom-entry "" "a" "old")
+                 0
+                 "ignored")
+                "11:textContent1:a4:done") 1 0))
