@@ -22,7 +22,7 @@ page <script> text ──runtime input──┐
 |---|---|
 | Language | expressions, `var`/`let`/`const`, assignment, **compound assignment** (`+=` `-=` `*=` `/=` `%=`) and **`++`/`--`** (prefix and postfix), `if`/`else`, ternary `?:`, `while`, `for`, **`for...of`** and **`for...in`**, `break`/`continue`, blocks, **functions** (declarations, function expressions incl. named and immediate, parameters, `return`, recursion, mutual recursion, hoisting), **closures** (capture by reference), **arrays and objects** (literals, `.k`, `[k]`, `.length`, member assignment, nesting), **method calls** and `this`, **builtins** (`push`/`pop`/`filter`/`map`/`forEach`/`join`/`indexOf`/`includes`/`slice`; `charAt`/`indexOf`/`substring`/`toLowerCase`/`toUpperCase`/`split`/`includes`), **`throw`/`try`/`catch`/`finally`** with real `Error` objects and **`new Error(...)`**, `typeof` (including the spec's unresolvable reference, so `typeof window` is `undefined` rather than an error), short-circuit `&&`/`||`, comments |
 | Not yet | prototypes and `instanceof`, `switch`, IEEE-754 numbers (integers only), host objects beyond `document.getElementById` — see Gaps |
-| Own tests | **223/223 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host, run in chunks) and on the restricted-ESM artifact |
+| Own tests | **230/230 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host, run in chunks) and on the restricted-ESM artifact |
 | Differential | **220/221 agree with a real host V8** (1 recorded divergence), and **35/35 agree with quickjs-ng** — the engine this one would replace — through `browser`'s `test/runtime-differential.cljs` |
 | Capabilities | **none** — `kotoba -M check` reports `:effects #{}`, DOM bridge included. A write is a VALUE the host replays; the authority never leaves the host |
 | wasm32-browser | **32 KB, instantiates and runs** — this is the target that replaces the QuickJS blob |
@@ -148,6 +148,32 @@ document.getElementById('ws-proof').textContent = 'done';
 The log is `<len>:<prop><len>:<id><len>:<value>`, appended in order, so the
 host replays exactly what the script asked for, in the order it asked.
 
+### Events
+
+`addEventListener` is not a write. It hands the host a **function**, and a
+guest with no capabilities cannot be called back. So the registration is what
+comes back — element, event type, and a handler **number** — and firing is a
+second entry point:
+
+```js
+var r = document.getElementById('out');
+document.getElementById('btn').addEventListener('click', function () {
+  r.textContent = 'fired';
+});
+```
+
+```
+eval-dom       -> 16:addEventListener3:btn10:5:click1:0
+eval-dom-event(…, 0) -> 11:textContent3:out5:fired
+```
+
+`eval-dom-event` re-runs the script to rebuild the environment, clears the
+log, and calls handler *n*, so only that handler's own effects come back.
+Re-running is the price of holding no state between calls, and it is the
+honest one: the host owns the state, so the guest has to be told everything it
+needs each time. The handler still sees what it closed over — which is exactly
+why the function itself stays inside the guest and only a number crosses.
+
 - **Reads come from the snapshot, and a write does not change it.** A script
   that sets `textContent` and reads it back sees what the host injected. That
   is the honest answer for a guest that cannot see the host's document, and it
@@ -156,7 +182,7 @@ host replays exactly what the script asked for, in the order it asked.
   so `if (el)` is a real guard.
 - `%dom` and `%fx` hold the snapshot and the log. No JavaScript identifier can
   spell those names, so no page script can reach or shadow them.
-- **The bridge is measured against quickjs-ng**, not against a recorded
+- **The bridge and its events are measured against quickjs-ng**, not against a recorded
   string: `browser`'s `test/runtime-differential.cljs` gives the real engine a
   `document` shim whose setter writes the same log format, and compares the
   two logs.

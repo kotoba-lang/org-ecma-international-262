@@ -47,7 +47,7 @@
   ;; constraint), so a syntax or evaluation failure is a `:error` VALUE
   ;; carrying its message, and callers test for it.
   (:export [main eval-number eval-string eval-typeof eval-ok
-            eval-dom eval-dom-value dom-entry
+            eval-dom eval-dom-value eval-dom-event dom-entry
             test-number test-arith test-precedence test-parens
             test-negative test-modulo test-division test-nested-parens
             test-string-literal test-string-concat test-string-number
@@ -127,6 +127,11 @@
             test-dom-compound-append test-dom-two-effects-keep-their-order
             test-dom-no-effects-is-empty test-dom-writes-are-not-readable
             test-dom-without-a-document
+            test-dom-listener-registration test-dom-fire-handler
+            test-dom-two-listeners-get-different-numbers
+            test-dom-fire-the-second-handler test-dom-handler-sees-its-capture
+            test-dom-unknown-handler-is-an-error
+            test-dom-registration-is-not-the-handlers-effect
             test-error-message test-error-name test-error-is-an-object
             test-thrown-value-is-not-wrapped test-type-error-name
             test-ternary-true test-ternary-false test-ternary-nested-in-arg
@@ -580,6 +585,7 @@
         (= (r-t x) :node)
         (cond (string=? k "textContent") (str-r (dom-text (r-env x) (r-s x)) "" 0)
               (string=? k "id") (str-r (r-s x) "" 0)
+              (string=? k "addEventListener") (builtin-r "addEventListener")
               :else (undef-r "" 0))
 
         ;; `document` is a builtin whose properties are its methods.
@@ -1195,6 +1201,24 @@
 ;; Writing a property of a host node is an EFFECT, not a rebinding: the value
 ;; is recorded for the host and the guest's own environment is unchanged apart
 ;; from the log. An assignment's value is the assigned value, as in JavaScript.
+;; --- event handlers --------------------------------------------------------
+;;
+;; `addEventListener` is not an effect in the way a write is: it hands the host
+;; a FUNCTION to call back later, and a guest with no capabilities cannot be
+;; called back. So the registration is what gets returned -- element, event
+;; type, and a handler NUMBER -- and firing is a second entry point.
+;;
+;; `eval-dom-event` re-runs the script to rebuild the environment, clears the
+;; log, and then calls handler n. Re-running is the price of holding no state
+;; between calls, and it is the honest one: the host owns the state, so the
+;; guest must be told everything it needs each time. Only the handler's own
+;; effects come back, because the log is cleared after the replay.
+(defn handler-name [n :i64] :string
+  (string-concat "%h" (string-from-i64 n)))
+
+(defn handler-count [env :string] :i64
+  (let [c (env-get env "%hn")] (if (err? c) 0 (r-n c))))
+
 (defn node-assign [s :string i :i64 nd [:ref :js/r] prop :string] [:ref :js/r]
   (let [v (ev-expr s i (r-env nd))]
     (if (err? v)
@@ -1265,6 +1289,23 @@
       ;; function and cannot see its receiver.
       (at? s i 40)
       (cond
+        ;; Registering a listener RETURNS the registration: element, event
+        ;; type, and the handler's number. The function itself stays inside
+        ;; the guest, under a name no JavaScript identifier can spell.
+        (if (= (r-t acc) :builtin) (string=? (r-s acc) "addEventListener") false)
+        (let [args (ev-args-array s (+ i 1) (r-env acc) 0 "")]
+          (if (err? args)
+            args
+            (let [n (handler-count (r-env args))
+                  e (fx-append (env-set (env-set (r-env args) (handler-name n)
+                                                 (arr-at args 1))
+                                        "%hn" (num-r (+ n 1) "" 0))
+                               (r-s recv) "addEventListener"
+                               (string-concat (fx-field (value-text (arr-at args 0)))
+                                              (fx-field (string-from-i64 n))))]
+              (ev-postfix-rest s (with-i (with-env (undef-r "" 0) e) (r-i args))
+                               (undef-r "" 0) ""))))
+
         ;; The one host call this slice admits. A missing id answers `null`,
         ;; as a real document does, so `if (el)` is a real guard.
         (if (= (r-t acc) :builtin) (string=? (r-s acc) "getElementById") false)
@@ -2155,6 +2196,24 @@
 
 ;; What the guest would read back, for tests and for a host that wants to
 ;; check its own snapshot round-trips.
+(defn eval-dom-event [src :string dom :string n :i64] :string
+  (let [r (ex-seq src 0 (undef-r (hoist src 0 (dom-env dom)) 0) -1)]
+    (if (err? r)
+      (string-concat "ERROR " (r-s r))
+      (let [env0 (env-set (r-env r) "%fx" (str-r "" "" 0))
+            f (env-get env0 (handler-name n))]
+        (if (err? f)
+          "ERROR ReferenceError: no such handler"
+          ;; Zero arguments: `ai` points at the function's own `)`, which is a
+          ;; position where `bind-args` finds no argument to bind.
+          (let [out (call-fn src f
+                             (- (skip-params src (+ (fn-params-start f) 1)) 1)
+                             env0 (undef-r "" 0))]
+            (if (err? out)
+              (string-concat "ERROR " (r-s out))
+              (let [fx (env-get (r-env out) "%fx")]
+                (if (err? fx) "" (r-s fx))))))))))
+
 (defn eval-dom-value [src :string dom :string] :string
   (value-text (ex-seq src 0 (undef-r (hoist src 0 (dom-env dom)) 0) -1)))
 
@@ -2576,3 +2635,47 @@
 ;; script's feature detection still works.
 (defn test-dom-without-a-document []
   (str-is "typeof document" "undefined"))
+
+;; --- event handlers -------------------------------------------------------
+(defn test-dom-listener-registration []
+  (dom-is "document.getElementById('btn').addEventListener('click', function () { });"
+          (dom-entry (dom-entry "" "btn" "") "out" "before")
+          "16:addEventListener3:btn10:5:click1:0"))
+;; Firing answers with the handler's OWN effects: the log is cleared after the
+;; replay, so the registration is not reported a second time.
+(defn test-dom-fire-handler []
+  (if (string=? (eval-dom-event
+                 "var r = document.getElementById('out'); document.getElementById('btn').addEventListener('click', function () { r.textContent = 'fired'; });"
+                 (dom-entry (dom-entry "" "btn" "") "out" "before")
+                 0)
+                "11:textContent3:out5:fired") 1 0))
+(defn test-dom-two-listeners-get-different-numbers []
+  (dom-is "var b = document.getElementById('btn'); b.addEventListener('click', function () { }); b.addEventListener('blur', function () { });"
+          (dom-entry (dom-entry "" "btn" "") "out" "before")
+          "16:addEventListener3:btn10:5:click1:016:addEventListener3:btn9:4:blur1:1"))
+(defn test-dom-fire-the-second-handler []
+  (if (string=? (eval-dom-event
+                 "var r = document.getElementById('out'); var b = document.getElementById('btn'); b.addEventListener('click', function () { r.textContent = 'A'; }); b.addEventListener('blur', function () { r.textContent = 'B'; });"
+                 (dom-entry (dom-entry "" "btn" "") "out" "before")
+                 1)
+                "11:textContent3:out1:B") 1 0))
+;; The handler reaches a variable the script closed over, which is the whole
+;; reason the function has to stay inside the guest.
+(defn test-dom-handler-sees-its-capture []
+  (if (string=? (eval-dom-event
+                 "var msg = 'from the capture'; var r = document.getElementById('out'); document.getElementById('btn').addEventListener('click', function () { r.textContent = msg; });"
+                 (dom-entry (dom-entry "" "btn" "") "out" "before")
+                 0)
+                "11:textContent3:out16:from the capture") 1 0))
+(defn test-dom-unknown-handler-is-an-error []
+  (if (string=? (eval-dom-event "1 + 1"
+                                (dom-entry (dom-entry "" "btn" "") "out" "before")
+                                7)
+                "ERROR ReferenceError: no such handler") 1 0))
+;; A script that only registers produces no textContent effect.
+(defn test-dom-registration-is-not-the-handlers-effect []
+  (if (string=? (eval-dom-event
+                 "var r = document.getElementById('out'); document.getElementById('btn').addEventListener('click', function () { });"
+                 (dom-entry (dom-entry "" "btn" "") "out" "before")
+                 0)
+                "") 1 0))
