@@ -86,7 +86,7 @@
             test-closure-shadows-caller test-closure-sees-outer-var
             test-nested-function-declaration test-nested-mutual-recursion
             test-this-on-object test-this-reads-sibling-property
-            test-plain-call-this-is-undefined-not-global
+            test-plain-call-this-is-the-global-object
             test-array-join test-array-join-default test-array-index-of
             test-array-index-of-missing test-array-includes test-array-slice
             test-string-char-at test-string-index-of test-string-substring
@@ -102,6 +102,8 @@
             test-function-expression test-function-expression-immediate
             test-function-expression-in-array test-named-function-expression
             test-declaration-needs-a-name
+            test-error-message test-error-name test-error-is-an-object
+            test-thrown-value-is-not-wrapped test-type-error-name
             test-ternary-true test-ternary-false test-ternary-nested-in-arg
             test-ternary-skips-the-untaken-arm test-and-short-circuits
             test-or-short-circuits
@@ -379,7 +381,8 @@
     (err-r (string-concat "ReferenceError: " name) env 0)
     (let [e (eq-at s i)]
       (if (< e 0)
-        (err-r (string-concat "ReferenceError: " name) env 0)
+        (err-r (string-concat "ReferenceError: "
+                            (string-concat name " is not defined")) env 0)
         (if (string=? (string-substring s i e) name)
           (decode-at s (+ e 1) name env)
           (env-find s (entry-end s (+ e 1)) name env))))))
@@ -405,7 +408,8 @@
 (defn env-get [env :string name :string] [:ref :js/r]
   (let [id (cell-id-of env name)]
     (if (< id 0)
-      (err-r (string-concat "ReferenceError: " name) env 0)
+      (err-r (string-concat "ReferenceError: "
+                            (string-concat name " is not defined")) env 0)
       (with-env (member-get (env-cells env) (string-from-i64 id)) env))))
 
 ;; ---------------------------------------------------------------------------
@@ -1052,15 +1056,21 @@
 
         :else
         (let [r (call-fn s acc (+ i 1) (r-env acc) recv)]
-          (if (err? r) r (ev-postfix-rest s r (undef-r "" 0) ""))))
+          (if (err? r) r (ev-postfix-rest s r (global-object) ""))))
 
       :else (with-i acc i))))
+
+;; A plain call's receiver is the GLOBAL object, as it is in a real engine in
+;; sloppy mode. This engine's global object carries no properties -- there are
+;; no globals to expose -- but it is an object, so `typeof this` answers
+;; "object" rather than "undefined".
+(defn global-object [] [:ref :js/r] (obj-r "" ""))
 
 (defn ev-postfix [s :string i0 :i64 env :string] [:ref :js/r]
   (let [i (ws s i0)
         bname (if (ident-start-cp? (cp s i)) (string-substring s i (ident-end s i)) "")
         r (ev-primary s i env)]
-    (if (err? r) r (ev-postfix-rest s r (undef-r "" 0) bname))))
+    (if (err? r) r (ev-postfix-rest s r (global-object) bname))))
 
 (defn mul-op [s :string i :i64] :i64
   (let [c (cp s i)]
@@ -1448,12 +1458,23 @@
           (undef-r (env-put env name (undef-r env 0)) (eat-semi s k))))
       (err-r "SyntaxError: expected a name after var/let/const" env j))))
 
-;; `catch` receives the thrown value for a `throw`, and the MESSAGE as a
-;; string for an internal error -- there is no Error object to construct.
+;; An internal error is caught as an OBJECT carrying `name` and `message`,
+;; split at the ": " the message was written with -- so `typeof e` is "object"
+;; and `e.message` reads the way a real engine's does. A THROWN value keeps its
+;; own type and is handed back untouched.
+;;
+;; This is not a prototype and there is no `Error` constructor: it is a plain
+;; object with the two properties that are actually read.
+(defn error-object [msg :string] [:ref :js/r]
+  (let [i (str-index-of msg ": " 0)
+        nm (if (< i 0) "Error" (string-substring msg 0 i))
+        m (if (< i 0) msg (string-substring msg (+ i 2) (string-length msg)))]
+    (obj-r (entry-put (entry-put "" "message" (str-r m "" 0)) "name" (str-r nm "" 0)) "")))
+
 (defn caught-value [e [:ref :js/r]] [:ref :js/r]
   (if (= (r-n e) 1)
     (member-get (r-s e) "v")
-    (str-r (r-s e) "" 0)))
+    (error-object (r-s e))))
 
 (defn ex-try [s :string i :i64 env :string] [:ref :js/r]
   (let [b (ws s (+ i 3))]
@@ -1774,8 +1795,8 @@
 ;; A real engine in sloppy mode substitutes the GLOBAL object for a plain
 ;; call's `this`. This engine has no global object to substitute, so `this`
 ;; stays undefined -- a divergence, recorded as one in the differential corpus.
-(defn test-plain-call-this-is-undefined-not-global []
-  (str-is "function f() { return typeof this; } f()" "undefined"))
+(defn test-plain-call-this-is-the-global-object []
+  (str-is "function f() { return typeof this; } f()" "object"))
 
 ;; --- builtin methods -------------------------------------------------------
 (defn test-array-join [] (str-is "[1, 2, 3].join('-')" "1-2-3"))
@@ -1800,7 +1821,7 @@
 (defn test-throw-number [] (num-is "try { throw 42; } catch (e) { e }" 42))
 (defn test-catch-binds-value [] (str-is "try { throw 7; } catch (e) { typeof e }" "number"))
 (defn test-try-without-throw [] (num-is "try { 5 } catch (e) { 9 }" 5))
-(defn test-catch-reference-error [] (str-is "try { nope } catch (e) { typeof e }" "string"))
+(defn test-catch-reference-error [] (str-is "try { nope } catch (e) { typeof e }" "object"))
 (defn test-catch-type-error [] (num-is "var x = 1; try { x() } catch (e) { 3 }" 3))
 (defn test-try-continues-after []
   (num-is "var t = 0; try { throw 1; } catch (e) { t = 5; } t + 1" 6))
@@ -1878,3 +1899,13 @@
 ;; The exact shape every smoke test in kotoba-lang/browser is written in.
 (defn test-smoke-suite-shape []
   (str-is "var r = []; r.push(1 === 1 ? 1 : 'a-failed'); r.push(2 > 1 ? 1 : 'b-failed'); var bad = r.filter(function(x) { return x !== 1; }); bad.length === 0 ? 'PASS' : 'FAIL:' + bad.join(';')" "PASS"))
+
+;; --- Error objects ---------------------------------------------------------
+(defn test-error-message [] (str-is "try { nope } catch (e) { e.message }" "nope is not defined"))
+(defn test-error-name [] (str-is "try { nope } catch (e) { e.name }" "ReferenceError"))
+(defn test-error-is-an-object [] (str-is "try { nope } catch (e) { typeof e }" "object"))
+;; A thrown value is handed back untouched -- it is not wrapped in an Error.
+(defn test-thrown-value-is-not-wrapped []
+  (str-is "try { throw 5; } catch (e) { typeof e }" "number"))
+(defn test-type-error-name []
+  (str-is "var x = 1; try { x() } catch (e) { e.name }" "TypeError"))

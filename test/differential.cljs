@@ -215,17 +215,20 @@
    "var k = 10; var r = [1, 2].map(function(x) { return x + k; }); r[1]"
    "[1, 2, 3, 4].filter(function(x) { return x % 2 == 0; }).join('|')"
    ;; the exact shape every smoke test in kotoba-lang/browser is written in
-   "var r = []; r.push(1 === 1 ? 1 : 'a-failed'); r.push(2 > 1 ? 1 : 'b-failed'); var bad = r.filter(function(x) { return x !== 1; }); bad.length === 0 ? 'PASS' : 'FAIL:' + bad.join(';')"])
+   "var r = []; r.push(1 === 1 ? 1 : 'a-failed'); r.push(2 > 1 ? 1 : 'b-failed'); var bad = r.filter(function(x) { return x !== 1; }); bad.length === 0 ? 'PASS' : 'FAIL:' + bad.join(';')"
+   ;; Error objects and the global receiver
+   "try { nope } catch (e) { typeof e }"
+   "try { nope } catch (e) { e.message }"
+   "try { nope } catch (e) { e.name }"
+   "try { throw 5; } catch (e) { typeof e }"
+   "var x = 1; try { x() } catch (e) { e.name }"
+   "function f() { return typeof this; } f()"])
 
 (def known-divergences
   "Cases where this engine and a real one genuinely disagree, each with the
   reason. The set is asserted EXACTLY, so a divergence that appears or
   disappears fails the run instead of being absorbed silently."
-  {"7 / 2" "JS numbers are IEEE-754 doubles; this engine's numbers are i64, so division truncates"
-   "try { nope } catch (e) { typeof e }"
-   "an INTERNAL error (ReferenceError, TypeError, SyntaxError) is caught as its MESSAGE STRING here. A real engine throws an Error OBJECT, which this engine has no constructor for. A thrown value keeps its own type -- `throw 42` catches a number -- so only the internal ones differ."
-   "function f() { return typeof this; } f()"
-   "a plain call has no receiver here, so `this` is undefined. A real engine in sloppy mode substitutes the GLOBAL object, which this engine does not have at all -- there is no globalThis to name."})
+  {"7 / 2" "JS numbers are IEEE-754 doubles; this engine's numbers are i64, so division truncates"})
 
 (defn host-eval
   "The real engine's answer, as the text this engine would print.
