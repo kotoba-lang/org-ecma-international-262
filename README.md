@@ -20,12 +20,12 @@ page <script> text ──runtime input──┐
 
 | | |
 |---|---|
-| Language | expressions, `var`/`let`/`const`, assignment, `if`/`else`, `while`, blocks, `typeof`, comments, string/number/boolean/undefined/null |
-| Not yet | functions, objects, arrays, `for`, `try`, closures, prototypes — see Gaps |
-| Own tests | **48/48 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host) and on the restricted-ESM artifact |
-| Differential | **56/57 agree with a real host V8**, 1 recorded divergence (`test/differential.cljs`) |
+| Language | expressions, `var`/`let`/`const`, assignment, `if`/`else`, `while`, blocks, **functions** (declaration, parameters, `return`, recursion, mutual recursion, hoisting), `typeof`, comments, string/number/boolean/undefined/null/function |
+| Not yet | objects, arrays, `for`, `try`, closures, prototypes — see Gaps |
+| Own tests | **64/64 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host) and on the restricted-ESM artifact |
+| Differential | **72/73 agree with a real host V8**, 1 recorded divergence (`test/differential.cljs`) |
 | Capabilities | **none** — `kotoba -M check` reports `:effects #{}`. A pure interpreter asks the host for nothing |
-| wasm32-browser | **16 KB, instantiates and runs** — this is the target that replaces the QuickJS blob |
+| wasm32-browser | **20 KB, instantiates and runs** — this is the target that replaces the QuickJS blob |
 
 ## Build and test
 
@@ -76,6 +76,11 @@ only the two simplest tests pass at that setting.
 - **The environment is a string.** Same cause: a record holding both a value
   and a collection blows the same 64-node budget, and a typed map holds 31
   entries. Entries are length-prefixed and prepended, so lookup is a scan.
+- **Functions have no closures.** The callee's environment is seeded from the
+  caller's, which is dynamic scope. Declarations, recursion, mutual recursion,
+  hoisting and globals all work; a function returned from another function and
+  called later would see the wrong bindings. This is the first thing a closure
+  slice has to replace, and it is why `call-fn` says so in its own body.
 - **Numbers are i64, not IEEE-754 doubles.** This is the one recorded
   divergence from the host engine (`7 / 2` is 3, not 3.5).
 - **Source is treated as ASCII.** `string-length` counts code points while

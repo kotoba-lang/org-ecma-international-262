@@ -61,7 +61,14 @@
             test-string-compare test-typeof-number test-typeof-string
             test-typeof-boolean test-typeof-undefined
             test-syntax-error test-unterminated-string test-undefined-variable
-            test-unbalanced-paren test-error-propagates])
+            test-unbalanced-paren test-error-propagates
+            test-function test-function-args test-function-expression-value
+            test-nested-call test-recursion test-early-return
+            test-hoisted-call test-mutual-recursion
+            test-missing-argument test-extra-argument
+            test-typeof-function test-calling-a-non-function
+            test-parameters-do-not-leak test-function-sees-globals
+            test-return-without-value test-string-returning-function])
 
   (:schemas
    {:js/r [:record :js/r
@@ -103,6 +110,15 @@
 
 (defn err-r [msg :string env :string i :i64] [:ref :js/r]
   (record-new [:ref :js/r] :error 0 msg env 2 i))
+
+;; A function value's text is the two source indices it needs to run again:
+;; `<parameter-list-start>,<body-start>`. There is no closure -- see `call-fn`.
+;; This is a named constructor rather than an inline `record-new` because a
+;; bare `record-new` in a `cond` branch is rejected with "if branches must
+;; have the same value type"; every sibling constructor here exists for the
+;; same reason.
+(defn fn-r [body :string env :string] [:ref :js/r]
+  (record-new [:ref :js/r] :function 0 body env 0 0))
 
 (defn err? [x [:ref :js/r]] :bool (= (r-t x) :error))
 
@@ -172,11 +188,13 @@
         (= t :string) "s"
         (= t :boolean) "b"
         (= t :null) "z"
+        (= t :function) "f"
         :else "u"))
 
 (defn value-text [x [:ref :js/r]] :string
   (let [t (r-t x)]
-    (cond (= t :number) (string-from-i64 (r-n x))
+    (cond (= t :function) "function"
+          (= t :number) (string-from-i64 (r-n x))
           (= t :boolean) (if (= (r-n x) 0) "false" "true")
           (= t :string) (r-s x)
           (= t :undefined) "undefined"
@@ -185,7 +203,12 @@
           :else "")))
 
 (defn stored-text [x [:ref :js/r]] :string
-  (if (= (r-t x) :string) (r-s x) (value-text x)))
+  (cond (= (r-t x) :string) (r-s x)
+        ;; A function is stored as the two source indices it needs to run
+        ;; again: where its parameter list starts and where its body starts.
+        ;; There is no closure -- see `call-fn`.
+        (= (r-t x) :function) (r-s x)
+        :else (value-text x)))
 
 (defn env-put [env :string name :string x [:ref :js/r]] :string
   (let [body (stored-text x)]
@@ -209,6 +232,7 @@
           (string=? tc "b") (bool-r (if (string=? body "true") 1 0) env 0)
           (string=? tc "s") (str-r body env 0)
           (string=? tc "z") (null-r env 0)
+          (string=? tc "f") (fn-r body env)
           :else (undef-r env 0))))
 
 (defn entry-end [s :string i :i64] :i64
@@ -242,6 +266,7 @@
     (cond (= t :boolean) (not (= (r-n x) 0))
           (= t :number) (not (= (r-n x) 0))
           (= t :string) (not (string=? (r-s x) ""))
+          (= t :function) true
           (= t :undefined) false
           (= t :null) false
           (= t :error) false
@@ -254,6 +279,7 @@
           (= t :boolean) "boolean"
           (= t :undefined) "undefined"
           (= t :null) "object"
+          (= t :function) "function"
           :else "error")))
 
 (defn cmp-str [a :string b :string i :i64] :i64
@@ -331,6 +357,77 @@
         (= (cp s i) q) i
         :else (scan-string-end s (+ i 1) q)))
 
+(defn fn-value [ps :i64 bs :i64] [:ref :js/r]
+  (fn-r (string-concat (string-from-i64 ps)
+                       (string-concat "," (string-from-i64 bs)))
+        ""))
+
+(defn fn-params-start [f [:ref :js/r]] :i64 (r-n (scan-digits (r-s f) 0 0)))
+
+(defn fn-body-start [f [:ref :js/r]] :i64
+  (let [t (r-s f)] (r-n (scan-digits t (+ (r-i (scan-digits t 0 0)) 1) 0))))
+
+;; Parameters are read from the declaration while arguments are evaluated at
+;; the call, both walking their own comma lists at once. A parameter with no
+;; argument is `undefined`; a surplus argument is evaluated (its effects are
+;; real) and dropped, which is what a real engine does.
+;;
+;; `:s` carries the callee environment being built and `:i` the position in
+;; the CALL, so one record answers both walks.
+(defn bind-args [src :string pi :i64 ai :i64 caller :string target :string]
+  [:ref :js/r]
+  (let [p (ws src pi)
+        a (ws src ai)]
+    (if (at? src p 41)
+      ;; No parameters left: consume any remaining arguments, then the `)`.
+      (if (at? src a 41)
+        (r-mk :string 0 target "" (+ a 1))
+        (let [v (ev-expr src a caller)]
+          (if (err? v)
+            v
+            (let [j (ws src (r-i v))]
+              (bind-args src p (if (at? src j 44) (+ j 1) j) caller target)))))
+      (if (ident-start-cp? (cp src p))
+        (let [pe (ident-end src p)
+              name (string-substring src p pe)
+              pn (ws src pe)
+              pnext (if (at? src pn 44) (+ pn 1) pn)]
+          (if (at? src a 41)
+            ;; Arguments exhausted: the rest of the parameters are undefined.
+            (bind-args src pnext a caller (env-put target name (undef-r "" 0)))
+            (let [v (ev-expr src a caller)]
+              (if (err? v)
+                v
+                (let [j (ws src (r-i v))]
+                  (bind-args src pnext (if (at? src j 44) (+ j 1) j) caller
+                             (env-put target name v)))))))
+        (err-r "SyntaxError: expected a parameter name" caller p)))))
+
+;; The callee environment is SEEDED from the caller's, which is dynamic scope
+;; rather than lexical closure. It is enough for declarations, recursion and
+;; globals, and it is the first thing a closure slice has to replace. The
+;; caller's own environment is returned unchanged, so a function's bindings do
+;; not leak back out.
+(defn call-fn [src :string f [:ref :js/r] ai :i64 env :string] [:ref :js/r]
+  (if (err? f)
+    f
+    (if (not (= (r-t f) :function))
+      (err-r "TypeError: value is not a function" env ai)
+      (let [bound (bind-args src (+ (fn-params-start f) 1) ai env env)]
+        (if (err? bound)
+          bound
+          (let [out (ex-stmt src (fn-body-start f) (r-s bound))]
+            (cond (err? out) out
+                  ;; The callee's `return` signal must be CLEARED here. It says
+                  ;; "stop running the function", and leaving it set makes
+                  ;; ex-seq stop running the CALLER too: `f(1); 42` evaluated
+                  ;; to 1 and never reached 42, while `var z = f(1); z + 1`
+                  ;; worked, because only the statement sequence reads the
+                  ;; signal.
+                  (= (r-sig out) 1)
+                  (with-sig (with-i (with-env out env) (r-i bound)) 0)
+                  :else (undef-r env (r-i bound)))))))))
+
 (defn ev-primary [s :string i0 :i64 env :string] [:ref :js/r]
   (let [i (ws s i0)
         c (cp s i)]
@@ -373,8 +470,12 @@
         (str-r (type-name r) (r-env r) (r-i r)))
 
       (ident-start-cp? c)
-      (let [e (ident-end s i)]
-        (with-i (env-get env (string-substring s i e)) e))
+      (let [e (ident-end s i)
+            name (string-substring s i e)
+            j (ws s e)]
+        (if (at? s j 40)
+          (call-fn s (env-get env name) (+ j 1) env)
+          (with-i (env-get env name) e)))
 
       :else (err-r "SyntaxError: unexpected character" env i))))
 
@@ -540,6 +641,30 @@
   (let [i (ws s i0)]
     (if (at? s i 123) (skip-braced s i 0) (skip-simple s i))))
 
+(defn skip-params [s :string i :i64] :i64
+  (cond (< (cp s i) 0) i
+        (at? s i 41) (+ i 1)
+        :else (skip-params s (+ i 1))))
+
+;; The two indices a function needs to run again: where its parameter list
+;; opens and where its body block opens. Answers -1 for `:i` when the shape is
+;; not a declaration, so the caller can report the syntax error in context.
+(defn fn-header [s :string i :i64] [:ref :js/r]
+  (let [j (ws s (+ i 8))]
+    (if (ident-start-cp? (cp s j))
+      (let [e (ident-end s j)
+            name (string-substring s j e)
+            k (ws s e)]
+        (if (at? s k 40)
+          (let [b (ws s (skip-params s (+ k 1)))]
+            (if (at? s b 123)
+              (r-mk :string 0 name (string-concat (string-from-i64 k)
+                                                  (string-concat "," (string-from-i64 b)))
+                    b)
+              (r-mk :string 0 name "" -1)))
+          (r-mk :string 0 name "" -1)))
+      (r-mk :string 0 "" "" -1))))
+
 (defn eat-semi [s :string i0 :i64] :i64
   (let [i (ws s i0)] (if (at? s i 59) (+ i 1) i)))
 
@@ -622,6 +747,15 @@
           (ex-while s (+ j 1) env)
           (err-r "SyntaxError: expected ( after while" env j)))
 
+      (word? s i "function")
+      (let [h (fn-header s i)]
+        (if (< (r-i h) 0)
+          (err-r "SyntaxError: malformed function declaration" env i)
+          (let [f (fn-r (r-env h) "")]
+            (with-sig (undef-r (env-put env (r-s h) f)
+                               (skip-braced s (r-i h) 0))
+                      3))))
+
       (word? s i "return")
       (let [j (ws s (+ i 6))]
         (if (if (at? s j 59) true (< (cp s j) 0))
@@ -662,7 +796,27 @@
 ;; library of entry points, so main is plumbing and returns 0.
 (defn main [] :i64 0)
 
-(defn run [src :string] [:ref :js/r] (ex-seq src 0 (undef-r "" 0) -1))
+;; Function declarations are hoisted, so a call may appear before the
+;; declaration and two functions may call each other. Only the TOP level is
+;; walked: a declaration nested inside a block or another function binds when
+;; that statement runs, which is the same order this evaluator uses anyway.
+(defn hoist [src :string i :i64 env :string] :string
+  (let [j (ws src i)]
+    (cond
+      (< (cp src j) 0) env
+      (word? src j "function")
+      (let [h (fn-header src j)]
+        (if (< (r-i h) 0)
+          env
+          (hoist src (skip-braced src (r-i h) 0)
+                 (env-put env (r-s h) (fn-r (r-env h) "")))))
+      :else
+      (let [next (skip-stmt src j)]
+        (if (<= next j) env (hoist src next env))))))
+
+(defn run [src :string] [:ref :js/r]
+  (let [env (hoist src 0 "")]
+    (ex-seq src 0 (undef-r env 0) -1)))
 
 (defn eval-number [src :string] :i64 (r-n (run src)))
 (defn eval-string [src :string] :string (value-text (run src)))
@@ -735,3 +889,27 @@
 (defn test-undefined-variable [] (type-is "nope" "error"))
 (defn test-unbalanced-paren [] (type-is "(1 + 2" "error"))
 (defn test-error-propagates [] (type-is "var x = nope; x + 1" "error"))
+
+(defn test-function [] (num-is "function f() { return 7; } f()" 7))
+(defn test-function-args [] (num-is "function add(a, b) { return a + b; } add(3, 4)" 7))
+(defn test-function-expression-value [] (num-is "function k() { return 5; } k() * 2" 10))
+(defn test-nested-call [] (num-is "function d(x) { return x * 2; } d(d(3))" 12))
+(defn test-recursion []
+  (num-is "function fact(n) { if (n <= 1) { return 1; } return n * fact(n - 1); } fact(5)" 120))
+(defn test-early-return []
+  (num-is "function f(x) { if (x > 0) { return 1; } return 2; } f(5)" 1))
+(defn test-hoisted-call [] (num-is "twice(4); function twice(n) { return n + n; } twice(4)" 8))
+(defn test-mutual-recursion []
+  (num-is "function ev(n) { if (n == 0) { return 1; } return od(n - 1); } function od(n) { if (n == 0) { return 0; } return ev(n - 1); } ev(6)" 1))
+(defn test-missing-argument [] (str-is "function f(a) { return typeof a; } f()" "undefined"))
+(defn test-extra-argument [] (num-is "function f(a) { return a; } f(3, 9)" 3))
+(defn test-typeof-function [] (str-is "function f() { return 1; } typeof f" "function"))
+(defn test-calling-a-non-function [] (type-is "var x = 1; x()" "error"))
+(defn test-parameters-do-not-leak []
+  (type-is "function f(hidden) { return hidden; } f(1); hidden" "error"))
+(defn test-function-sees-globals []
+  (num-is "var g = 6; function f() { return g + 1; } f()" 7))
+(defn test-return-without-value []
+  (str-is "function f() { return; } typeof f()" "undefined"))
+(defn test-string-returning-function []
+  (str-is "function greet(who) { return 'hi ' + who; } greet('you')" "hi you"))

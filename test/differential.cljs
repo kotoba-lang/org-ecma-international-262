@@ -76,7 +76,24 @@
    "var n = 0; var k = 0; while (k < 10) { if (k % 2 == 0) { n = n + k; } k = k + 1; } n"
    ";;; 5 ;;;"
    "// a comment\n1 + 1 // trailing\n"
-   "var s = ''; var i = 0; while (i < 3) { s = s + 'x'; i = i + 1; } s"])
+   "var s = ''; var i = 0; while (i < 3) { s = s + 'x'; i = i + 1; } s"
+   ;; functions
+   "function f() { return 7; } f()"
+   "function add(a, b) { return a + b; } add(3, 4)"
+   "function d(x) { return x * 2; } d(d(3))"
+   "function fact(n) { if (n <= 1) { return 1; } return n * fact(n - 1); } fact(5)"
+   "function f(x) { if (x > 0) { return 1; } return 2; } f(5)"
+   "twice(4); function twice(n) { return n + n; } twice(4)"
+   "function ev(n) { if (n == 0) { return 1; } return od(n - 1); } function od(n) { if (n == 0) { return 0; } return ev(n - 1); } ev(6)"
+   "function f(a) { return typeof a; } f()"
+   "function f(a) { return a; } f(3, 9)"
+   "function f() { return 1; } typeof f"
+   "function f() { return; } typeof f()"
+   "function greet(who) { return 'hi ' + who; } greet('you')"
+   "var g = 6; function f() { return g + 1; } f()"
+   "function f() { return 3; } f(); 42"
+   "function sum(n) { var t = 0; var i = 1; while (i <= n) { t = t + i; i = i + 1; } return t; } sum(10)"
+   "function outer(n) { return inner(n) + 1; } function inner(n) { return n * 10; } outer(2)"])
 
 (def known-divergences
   "Cases where this engine and a real one genuinely disagree, each with the
