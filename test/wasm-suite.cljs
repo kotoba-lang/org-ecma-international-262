@@ -59,13 +59,23 @@
                         (path/join amu "bin" "kotoba") "` both failed")))))))
 
 (defn- slice
-  "Engine plus one contiguous run of test functions, exporting exactly those."
+  "Engine plus one contiguous run of test functions, exporting exactly those.
+
+  Everything ABOVE the first `(defn test-` is carried into every chunk; a
+  helper defined below it belongs to whichever chunk happens to contain the
+  test it was written next to, and the other chunks fail to compile where they
+  call it. Measured 2026-08-29: `dom-is` was written beside the tests that use
+  it and the last chunk -- the only one without it -- failed with `operation
+  has no admitted lowering`. Put test helpers above the first test."
   [src from n]
   (let [marker ";; tests -- each runs"
         cut (str/index-of src marker)
         head (subs src 0 cut)
         tail (subs src cut)
-        first-test (str/index-of tail "(defn test-")
+        ;; Anchored to a line start. Unanchored, the first PROSE mention of
+        ;; the marker became the boundary -- measured 2026-08-29, when a
+        ;; comment explaining this very rule cut the helpers off above itself.
+        first-test (inc (str/index-of tail "\n(defn test-"))
         helpers (subs tail 0 first-test)
         blocks (->> (str/split (subs tail first-test) #"(?=\n\(defn test-)")
                     (map str/trim)

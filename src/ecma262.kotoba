@@ -47,7 +47,8 @@
   ;; constraint), so a syntax or evaluation failure is a `:error` VALUE
   ;; carrying its message, and callers test for it.
   (:export [main eval-number eval-string eval-typeof eval-ok
-            eval-dom eval-dom-value eval-dom-event dom-entry
+            eval-dom eval-dom-value eval-dom-event
+            dom-entry dom-node dom-node-attr dom-node-prop dom-put
             test-number test-arith test-precedence test-parens
             test-negative test-modulo test-division test-nested-parens
             test-string-literal test-string-concat test-string-number
@@ -137,6 +138,12 @@
             test-switch-is-strict test-switch-no-match-no-default
             test-switch-break-leaves-only-the-switch test-switch-return
             test-switch-on-strings
+            test-dom-get-attribute test-dom-get-missing-attribute-is-null
+            test-dom-attribute-does-not-shadow-text-content
+            test-dom-set-attribute test-dom-set-attribute-is-not-a-read
+            test-dom-title-read test-dom-title-write test-dom-title-default
+            test-console-log test-console-log-two-arguments
+            test-console-is-not-an-element
             test-error-message test-error-name test-error-is-an-object
             test-thrown-value-is-not-wrapped test-type-error-name
             test-ternary-true test-ternary-false test-ternary-nested-in-arg
@@ -564,9 +571,19 @@
 
 ;; The snapshot maps element id -> textContent, in the same length-prefixed
 ;; entry format the environment uses, so building one costs nothing new.
-(defn dom-text [env :string id :string] :string
+(defn dom-node-region [env :string id :string] :string
   (let [v (member-get (dom-snapshot env) id)]
+    (if (= (r-t v) :object) (r-s v) "")))
+
+(defn dom-text [env :string id :string] :string
+  (let [v (member-get (dom-node-region env id) "textContent")]
     (if (= (r-t v) :undefined) "" (value-text v))))
+
+;; Attributes are stored under `@name` so an element carrying an attribute
+;; literally called `textContent` cannot shadow the property of that name.
+(defn dom-attr [env :string id :string name :string] [:ref :js/r]
+  (let [v (member-get (dom-node-region env id) (string-concat "@" name))]
+    (if (= (r-t v) :undefined) (null-r "" 0) v)))
 
 (defn member-of [x [:ref :js/r] k :string] [:ref :js/r]
   (cond (= (r-t x) :array)
@@ -587,17 +604,25 @@
 
         ;; A node's properties are read from the snapshot, so a read is
         ;; still a pure function of (source, snapshot).
+        ;; `document` and `console` are nodes too, under ids no HTML id can
+        ;; spell (`#document`, `#console`), so a write to `document.title` is
+        ;; the same rule as a write to any other node's property and needs no
+        ;; second path through the assignment code.
         (= (r-t x) :node)
         (cond (string=? k "textContent") (str-r (dom-text (r-env x) (r-s x)) "" 0)
               (string=? k "id") (str-r (r-s x) "" 0)
               (string=? k "addEventListener") (builtin-r "addEventListener")
-              :else (undef-r "" 0))
-
-        ;; `document` is a builtin whose properties are its methods.
-        (if (= (r-t x) :builtin) (string=? (r-s x) "document") false)
-        (if (string=? k "getElementById")
-          (builtin-r "getElementById")
-          (undef-r "" 0))
+              (string=? k "getAttribute") (builtin-r "getAttribute")
+              (string=? k "setAttribute") (builtin-r "setAttribute")
+              (string=? k "getElementById")
+              (if (string=? (r-s x) "#document")
+                (builtin-r "getElementById")
+                (undef-r "" 0))
+              (string=? k "log")
+              (if (string=? (r-s x) "#console") (builtin-r "log") (undef-r "" 0))
+              ;; Anything else is read from the node's own region, which is how
+              ;; `document.title` works without a rule of its own.
+              :else (member-get (dom-node-region (r-env x) (r-s x)) k))
 
         (err? x) x
 
@@ -1294,6 +1319,48 @@
       ;; function and cannot see its receiver.
       (at? s i 40)
       (cond
+        ;; `console.log` is an effect like any other: the guest says what it
+        ;; wants written, the host decides whether anything is listening.
+        (if (= (r-t acc) :builtin) (string=? (r-s acc) "log") false)
+        (let [args (ev-args-array s (+ i 1) (r-env acc) 0 "")]
+          (if (err? args)
+            args
+            (ev-postfix-rest
+             s (with-i (with-env (undef-r "" 0)
+                                 (fx-append (r-env args) "#console" "log"
+                                            (arr-join-with args 0 " " "")))
+                       (r-i args))
+             (undef-r "" 0) "")))
+
+        ;; A read: answered from the snapshot, `null` when the element does
+        ;; not carry that attribute, as a real `getAttribute` does.
+        (if (= (r-t acc) :builtin) (string=? (r-s acc) "getAttribute") false)
+        (let [args (ev-args-array s (+ i 1) (r-env acc) 0 "")]
+          (if (err? args)
+            args
+            (ev-postfix-rest
+             s (with-i (with-env (dom-attr (r-env args) (r-s recv)
+                                           (value-text (arr-at args 0)))
+                                 (r-env args))
+                       (r-i args))
+             (undef-r "" 0) "")))
+
+        ;; A write: an effect, like every other write. The value field nests
+        ;; the attribute name and the new value, the same way a registration
+        ;; nests its type and handler number.
+        (if (= (r-t acc) :builtin) (string=? (r-s acc) "setAttribute") false)
+        (let [args (ev-args-array s (+ i 1) (r-env acc) 0 "")]
+          (if (err? args)
+            args
+            (ev-postfix-rest
+             s (with-i (with-env (undef-r "" 0)
+                                 (fx-append (r-env args) (r-s recv) "setAttribute"
+                                            (string-concat
+                                             (fx-field (value-text (arr-at args 0)))
+                                             (fx-field (value-text (arr-at args 1))))))
+                       (r-i args))
+             (undef-r "" 0) "")))
+
         ;; Registering a listener RETURNS the registration: element, event
         ;; type, and the handler's number. The function itself stays inside
         ;; the guest, under a name no JavaScript identifier can spell.
@@ -2285,12 +2352,26 @@
 ;; length-prefixed entry format the environment uses (`dom-entry` builds one).
 ;; The answer is the effect log, which the host replays. Nothing else crosses.
 (defn dom-env [dom :string] :string
-  (env-put (env-put (env-put "" "%dom" (str-r dom "" 0))
-                    "%fx" (str-r "" "" 0))
-           "document" (builtin-r "document")))
+  (env-put (env-put (env-put (env-put "" "%dom" (str-r dom "" 0))
+                             "%fx" (str-r "" "" 0))
+                    "document" (node-r "#document"))
+           "console" (node-r "#console")))
 
+(defn dom-node [text :string] :string
+  (entry-put "" "textContent" (str-r text "" 0)))
+
+(defn dom-node-attr [node :string name :string v :string] :string
+  (entry-put node (string-concat "@" name) (str-r v "" 0)))
+
+(defn dom-node-prop [node :string name :string v :string] :string
+  (entry-put node name (str-r v "" 0)))
+
+(defn dom-put [region :string id :string node :string] :string
+  (entry-put region id (obj-r node "")))
+
+;; An element with nothing but text -- the common case, kept as one call.
 (defn dom-entry [region :string id :string text :string] :string
-  (entry-put region id (str-r text "" 0)))
+  (dom-put region id (dom-node text)))
 
 (defn eval-dom [src :string dom :string] :string
   (let [r (ex-seq src 0 (undef-r (hoist src 0 (dom-env dom)) 0) -1)]
@@ -2329,6 +2410,16 @@
 (defn num-is [src :string want :i64] :i64 (if (= (eval-number src) want) 1 0))
 (defn str-is [src :string want :string] :i64 (if (string=? (eval-string src) want) 1 0))
 (defn type-is [src :string want :string] :i64 (if (string=? (eval-typeof src) want) 1 0))
+
+;; A test helper must live HERE, above the first test: the chunked wasm
+;; harness slices this file at test boundaries and carries everything above
+;; the first one into every chunk. A helper defined further down belongs to
+;; one chunk only, and the chunks that do not get it fail to compile -- which
+;; is how this comment came to be written. (An earlier draft of it named the
+;; boundary marker literally and BECAME one, which is how the second sentence
+;; of it came to be written.)
+(defn dom-is [src :string dom :string want :string] :i64
+  (if (string=? (eval-dom src dom) want) 1 0))
 
 (defn test-number [] (num-is "42" 42))
 (defn test-arith [] (num-is "1 + 2 - 3" 0))
@@ -2696,9 +2787,6 @@
 
 ;; --- the DOM bridge -------------------------------------------------------
 ;; The log is <proplen>:<prop><idlen>:<id><vallen>:<value>, appended in order.
-(defn dom-is [src :string dom :string want :string] :i64
-  (if (string=? (eval-dom src dom) want) 1 0))
-
 (defn test-dom-set-text []
   (dom-is "document.getElementById('ws-proof').textContent = 'hello';"
           (dom-entry "" "ws-proof" "")
@@ -2810,3 +2898,52 @@
   (str-is "function f(x) { switch (x) { case 1: return 'one'; default: return 'other'; } } f(1) + f(2)" "oneother"))
 (defn test-switch-on-strings []
   (str-is "var o = ''; switch ('b') { case 'a': o = 'A'; break; case 'b': o = 'B'; break; } o" "B"))
+
+;; --- attributes -----------------------------------------------------------
+(defn test-dom-get-attribute []
+  (if (string=? (eval-dom-value "document.getElementById('a').getAttribute('title')"
+                                (dom-put "" "a" (dom-node-attr (dom-node "text") "title" "hi")))
+                "hi") 1 0))
+;; A missing attribute is null, not undefined -- that is what a real one does.
+(defn test-dom-get-missing-attribute-is-null []
+  (if (string=? (eval-dom-value "document.getElementById('a').getAttribute('nope')"
+                                (dom-put "" "a" (dom-node-attr (dom-node "text") "title" "hi")))
+                "null") 1 0))
+;; An attribute called textContent must not become the property.
+(defn test-dom-attribute-does-not-shadow-text-content []
+  (if (string=? (eval-dom-value "document.getElementById('a').textContent"
+                                (dom-put "" "a" (dom-node-attr (dom-node "real") "textContent" "fake")))
+                "real") 1 0))
+(defn test-dom-set-attribute []
+  (dom-is "document.getElementById('a').setAttribute('class', 'on');"
+          (dom-entry "" "a" "")
+          "12:setAttribute1:a11:5:class2:on"))
+;; Writing does not change what a later read sees, the same as textContent.
+(defn test-dom-set-attribute-is-not-a-read []
+  (if (string=? (eval-dom-value "var e = document.getElementById('a'); e.setAttribute('title', 'new'); e.getAttribute('title')"
+                                (dom-put "" "a" (dom-node-attr (dom-node "t") "title" "old")))
+                "old") 1 0))
+
+;; --- document.title and console.log ---------------------------------------
+;; `document` and `console` are nodes under reserved ids, so neither needs a
+;; rule of its own in the assignment or call paths.
+(defn test-dom-title-read []
+  (if (string=? (eval-dom-value "document.title"
+                                (dom-put "" "#document" (dom-node-prop "" "title" "Hello")))
+                "Hello") 1 0))
+(defn test-dom-title-write []
+  (dom-is "document.title = 'New';"
+          (dom-put "" "#document" (dom-node-prop "" "title" "Old"))
+          "5:title9:#document3:New"))
+;; A document whose title the host did not send reads as undefined, not as an
+;; error: the guest is told what the host chose to tell it.
+(defn test-dom-title-default []
+  (str-is "typeof document" "undefined"))
+(defn test-console-log []
+  (dom-is "console.log('hi');" (dom-entry "" "a" "") "3:log8:#console2:hi"))
+(defn test-console-log-two-arguments []
+  (dom-is "console.log('a', 'b');" (dom-entry "" "a" "") "3:log8:#console3:a b"))
+(defn test-console-is-not-an-element []
+  (if (string=? (eval-dom-value "console.getAttribute ? 'has' : 'lacks'"
+                                (dom-entry "" "a" ""))
+                "has") 1 0))

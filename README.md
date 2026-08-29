@@ -21,8 +21,8 @@ page <script> text ──runtime input──┐
 | | |
 |---|---|
 | Language | expressions, `var`/`let`/`const`, assignment, **compound assignment** (`+=` `-=` `*=` `/=` `%=`) and **`++`/`--`** (prefix and postfix), `if`/`else`, ternary `?:`, `while`, `for`, **`for...of`** and **`for...in`**, **`switch`** (with fallthrough), `break`/`continue`, blocks, **functions** (declarations, function expressions incl. named and immediate, parameters, `return`, recursion, mutual recursion, hoisting), **closures** (capture by reference), **arrays and objects** (literals, `.k`, `[k]`, `.length`, member assignment, nesting), **method calls** and `this`, **builtins** (`push`/`pop`/`filter`/`map`/`forEach`/`join`/`indexOf`/`includes`/`slice`; `charAt`/`indexOf`/`substring`/`toLowerCase`/`toUpperCase`/`split`/`includes`), **`throw`/`try`/`catch`/`finally`** with real `Error` objects and **`new Error(...)`**, `typeof` (including the spec's unresolvable reference, so `typeof window` is `undefined` rather than an error), short-circuit `&&`/`||`, comments |
-| Not yet | prototypes and `instanceof`, IEEE-754 numbers (integers only), host objects beyond `document.getElementById` and `addEventListener` — see Gaps |
-| Own tests | **240/240 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host, run in chunks) and on the restricted-ESM artifact |
+| Not yet | prototypes and `instanceof`, IEEE-754 numbers (integers only), host objects beyond the eight below — see Gaps |
+| Own tests | **251/251 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host, run in chunks) and on the restricted-ESM artifact |
 | Differential | **237/238 agree with a real host V8** (1 recorded divergence), and **51/51 agree with quickjs-ng** across language, DOM writes and events — the engine this one would replace — through `browser`'s `test/runtime-differential.cljs` |
 | Capabilities | **none** — `kotoba -M check` reports `:effects #{}`, DOM bridge included. A write is a VALUE the host replays; the authority never leaves the host |
 | wasm32-browser | **32 KB, instantiates and runs** — this is the target that replaces the QuickJS blob |
@@ -147,6 +147,37 @@ document.getElementById('ws-proof').textContent = 'done';
 
 The log is `<len>:<prop><len>:<id><len>:<value>`, appended in order, so the
 host replays exactly what the script asked for, in the order it asked.
+
+Attributes travel the same way. The snapshot gives each element a small region
+of its own — `textContent`, then each attribute under `@name`, so an element
+carrying an attribute literally called `textContent` cannot shadow the
+property — and `setAttribute` is an effect whose value nests the name and the
+new value:
+
+```
+12:setAttribute1:a11:5:class2:on
+```
+
+`getAttribute` answers `null` for an attribute the element does not carry,
+which is what a real one does and what makes `if (el.getAttribute('x'))` a
+real guard.
+
+### What the guest can reach
+
+`document` and `console` are **nodes too**, under ids no HTML id can spell —
+`#document` and `#console`. That is not a trick to save code, it is what
+removes the special cases: a write to `document.title` is the same rule as a
+write to any element's property, so the assignment path has one rule rather
+than three.
+
+| | reads | writes |
+|---|---|---|
+| element | `textContent`, `getAttribute(n)` | `textContent`, `setAttribute(n, v)`, `addEventListener(type, fn)` |
+| `document` | `title`, `getElementById(id)` | `title` |
+| `console` | — | `log(…)` |
+
+That is the whole surface. Anything else is `undefined`, which a page script
+can test for — the same way it tests for a feature a browser does not have.
 
 ### Events
 
