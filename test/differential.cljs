@@ -118,13 +118,38 @@
    "'' + [1, 2, 3]"
    "'' + {a: 1}"
    "function pair(a, b) { return [a, b]; } pair(3, 4)[1]"
-   "function f() { return 1; } var o = {g: f}; typeof o.g"])
+   "function f() { return 1; } var o = {g: f}; typeof o.g"
+   ;; for
+   "var t = 0; for (var i = 0; i < 5; i = i + 1) { t = t + 1; } t"
+   "var t = 0; for (var i = 1; i <= 4; i = i + 1) { t = t + i; } t"
+   "var t = 9; for (var i = 0; i < 0; i = i + 1) { t = 0; } t"
+   "var a = [2, 4, 6]; var t = 0; for (var i = 0; i < a.length; i = i + 1) { t = t + a[i]; } t"
+   "var t = 0; for (var i = 0; i < 3; i = i + 1) { for (var j = 0; j < 2; j = j + 1) { t = t + 1; } } t"
+   "function first(a) { for (var i = 0; i < a.length; i = i + 1) { return a[i]; } return 0; } first([7, 8])"
+   "var s = ''; for (var i = 0; i < 3; i = i + 1) { s = s + 'ab'; } s"
+   ;; calls in postfix position
+   "function f() { return 4; } var o = {m: f}; o.m()"
+   "function add(a, b) { return a + b; } var o = {plus: add}; o.plus(2, 3)"
+   "function f() { return 6; } var a = [f]; a[0]()"
+   "function outer() { return inner; } function inner() { return 3; } outer()()"
+   "function f() { return 11; } var o = {deep: {m: f}}; o.deep.m()"
+   ;; closures
+   "function makeAdder(n) { function add(x) { return n + x; } return add; } makeAdder(5)(3)"
+   "function make() { var secret = 42; function peek() { return secret; } return peek; } var p = make(); p()"
+   "function make() { var v = 1; function get() { return v; } return get; } var g = make(); var v = 99; g()"
+   "var base = 10; function f() { return base + 1; } f()"
+   "function outer() { function inner(k) { return k * 3; } return inner(4); } outer()"
+   "function outer(n) { function ev(k) { if (k == 0) { return 1; } return od(k - 1); } function od(k) { if (k == 0) { return 0; } return ev(k - 1); } return ev(n); } outer(4)"
+   "function make() { var c = 0; function inc() { c = c + 1; return c; } return inc; } var f = make(); f(); f()"
+   "function twice(g, x) { return g(g(x)); } function inc(n) { return n + 1; } twice(inc, 5)"])
 
 (def known-divergences
   "Cases where this engine and a real one genuinely disagree, each with the
   reason. The set is asserted EXACTLY, so a divergence that appears or
   disappears fails the run instead of being absorbed silently."
-  {"7 / 2" "JS numbers are IEEE-754 doubles; this engine's numbers are i64, so division truncates"})
+  {"7 / 2" "JS numbers are IEEE-754 doubles; this engine's numbers are i64, so division truncates"
+   "function make() { var c = 0; function inc() { c = c + 1; return c; } return inc; } var f = make(); f(); f()"
+   "closures capture BY VALUE: environments here are immutable strings, so inc updates its own copy and the outer c does not move. A read-only capture (makeAdder) agrees; a stateful counter does not."})
 
 (defn host-eval
   "The real engine's answer, as the text this engine would print.

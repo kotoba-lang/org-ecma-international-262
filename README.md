@@ -20,12 +20,12 @@ page <script> text ──runtime input──┐
 
 | | |
 |---|---|
-| Language | expressions, `var`/`let`/`const`, assignment, `if`/`else`, `while`, blocks, **functions** (declaration, parameters, `return`, recursion, mutual recursion, hoisting), **arrays and objects** (literals, `.k`, `[k]`, `.length`, member assignment, nesting), `typeof`, comments, string/number/boolean/undefined/null/function/object |
-| Not yet | `for`, `try`, closures, prototypes, methods (`o.f()`), array builtins — see Gaps |
-| Own tests | **89/89 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host) and on the restricted-ESM artifact |
-| Differential | **96/97 agree with a real host V8**, 1 recorded divergence (`test/differential.cljs`) |
+| Language | expressions, `var`/`let`/`const`, assignment, `if`/`else`, `while`, blocks, **functions** (declaration, parameters, `return`, recursion, mutual recursion, hoisting), **arrays and objects** (literals, `.k`, `[k]`, `.length`, member assignment, nesting), **`for`**, **method calls** (`o.f()`, `a[0]()`, `f()()`), **closures**, `typeof`, comments, string/number/boolean/undefined/null/function/object |
+| Not yet | `try`, `this`, prototypes, array builtins, `for...in`/`of` — see Gaps |
+| Own tests | **106/106 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host) and on the restricted-ESM artifact |
+| Differential | **115/117 agree with a real host V8**, 2 recorded divergences (`test/differential.cljs`) |
 | Capabilities | **none** — `kotoba -M check` reports `:effects #{}`. A pure interpreter asks the host for nothing |
-| wasm32-browser | **26 KB, instantiates and runs** — this is the target that replaces the QuickJS blob |
+| wasm32-browser | **29 KB, instantiates and runs** — this is the target that replaces the QuickJS blob |
 
 ## Build and test
 
@@ -85,11 +85,20 @@ only the two simplest tests pass at that setting.
   keyed by decimal index with its length carried in front. Entries are
   length-prefixed, so nesting one inside another needs no escaping. Lookup is
   a scan, and a property write prepends rather than rewrites.
-- **Functions have no closures.** The callee's environment is seeded from the
-  caller's, which is dynamic scope. Declarations, recursion, mutual recursion,
-  hoisting and globals all work; a function returned from another function and
-  called later would see the wrong bindings. This is the first thing a closure
-  slice has to replace, and it is why `call-fn` says so in its own body.
+- **Closures capture BY VALUE.** A function value carries the environment that
+  existed where it was written, so a function returned out of another still
+  sees what it referred to. But environments here are immutable strings, so a
+  function that ASSIGNS to a captured name updates its own copy and the outer
+  binding does not move: `makeAdder` works, a stateful counter does not. The
+  differential harness records that exact program as a divergence rather than
+  leaving it to be found.
+- **A caller's bindings are still visible behind the capture.** Captured names
+  win, which is what makes it a closure, but a name in neither the capture nor
+  the caller is the only ReferenceError. The tail is deliberate: it is what
+  lets a function reach a sibling declared later, and itself, neither of which
+  a snapshot taken at declaration time can contain.
+- **A method does not see its receiver.** `o.f()` calls `f`; there is no
+  `this`.
 - **Numbers are i64, not IEEE-754 doubles.** This is the one recorded
   divergence from the host engine (`7 / 2` is 3, not 3.5).
 - **Source is treated as ASCII.** `string-length` counts code points while

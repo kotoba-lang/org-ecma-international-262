@@ -77,7 +77,14 @@
             test-nested-object test-object-in-array test-array-in-object
             test-typeof-object test-typeof-array test-string-length
             test-array-string-render test-object-string-render
-            test-array-from-function test-object-holds-function])
+            test-array-from-function test-object-holds-function
+            test-for-loop test-for-sum test-for-no-iterations
+            test-for-over-array test-for-nested test-for-return
+            test-method-call test-method-with-args test-call-from-array
+            test-chained-call test-method-on-nested-object
+            test-closure-captures-parameter test-closure-outlives-its-frame
+            test-closure-shadows-caller test-closure-sees-outer-var
+            test-nested-function-declaration test-nested-mutual-recursion])
 
   (:schemas
    {:js/r [:record :js/r
@@ -446,15 +453,42 @@
         (= (cp s i) q) i
         :else (scan-string-end s (+ i 1) q)))
 
-(defn fn-value [ps :i64 bs :i64] [:ref :js/r]
-  (fn-r (string-concat (string-from-i64 ps)
-                       (string-concat "," (string-from-i64 bs)))
+(defn fn-value [ps :i64 bs :i64 captured :string] [:ref :js/r]
+  (fn-r (fn-text (string-concat (string-from-i64 ps)
+                                (string-concat "," (string-from-i64 bs)))
+                 captured)
         ""))
+
+;; A function's text is `<params-start>,<body-start>,<len>:<captured-env>`.
+;; The captured environment is what makes a closure: it is the environment
+;; that existed where the function was WRITTEN, carried inside the value, so a
+;; function returned out of another still sees what it referred to.
+;;
+;; Capture is BY VALUE. Environments here are immutable strings, so a function
+;; that assigns to a captured name updates its own copy and the outer binding
+;; does not move. `makeAdder` works; a stateful counter does not, and the
+;; differential harness records exactly that as a divergence rather than
+;; leaving it to be discovered.
+(defn fn-text [pb :string captured :string] :string
+  (string-concat pb
+                 (string-concat ","
+                                (string-concat (string-from-i64 (string-length captured))
+                                               (string-concat ":" captured)))))
 
 (defn fn-params-start [f [:ref :js/r]] :i64 (r-n (scan-digits (r-s f) 0 0)))
 
 (defn fn-body-start [f [:ref :js/r]] :i64
   (let [t (r-s f)] (r-n (scan-digits t (+ (r-i (scan-digits t 0 0)) 1) 0))))
+
+(defn fn-env [f [:ref :js/r]] :string
+  (let [t (r-s f)
+        a (scan-digits t 0 0)
+        b (scan-digits t (+ (r-i a) 1) 0)
+        n (scan-digits t (+ (r-i b) 1) 0)
+        start (+ (r-i n) 1)]
+    (if (> (+ start (r-n n)) (string-length t))
+      ""
+      (string-substring t start (+ start (r-n n))))))
 
 ;; Parameters are read from the declaration while arguments are evaluated at
 ;; the call, both walking their own comma lists at once. A parameter with no
@@ -492,17 +526,31 @@
                              (env-put target name v)))))))
         (err-r "SyntaxError: expected a parameter name" caller p)))))
 
-;; The callee environment is SEEDED from the caller's, which is dynamic scope
-;; rather than lexical closure. It is enough for declarations, recursion and
-;; globals, and it is the first thing a closure slice has to replace. The
-;; caller's own environment is returned unchanged, so a function's bindings do
+;; The callee environment is the function's CAPTURED environment, with the
+;; caller's behind it. Captured entries come first, so a captured name wins
+;; over a caller's name of the same spelling -- which is what makes this a
+;; closure rather than dynamic scope.
+;;
+;; The caller's tail is still there on purpose, and it is the honest
+;; difference from a real engine: it is what lets a function reach a sibling
+;; declared LATER (mutual recursion) and reach itself, neither of which a
+;; snapshot taken at declaration time can contain. A name that is in neither
+;; the capture nor the caller is a ReferenceError, as it should be; a name
+;; that is only in the caller resolves where a real engine would refuse.
+;;
+;; The body's own declarations are hoisted into that environment first, so a
+;; nested function may be called before its declaration and two nested
+;; functions may call each other.
+;;
+;; The caller's environment is returned unchanged, so a function's bindings do
 ;; not leak back out.
 (defn call-fn [src :string f [:ref :js/r] ai :i64 env :string] [:ref :js/r]
   (if (err? f)
     f
     (if (not (= (r-t f) :function))
       (err-r "TypeError: value is not a function" env ai)
-      (let [bound (bind-args src (+ (fn-params-start f) 1) ai env env)]
+      (let [base (hoist src (+ (fn-body-start f) 1) (string-concat (fn-env f) env))
+            bound (bind-args src (+ (fn-params-start f) 1) ai env base)]
         (if (err? bound)
           bound
           (let [out (ex-stmt src (fn-body-start f) (r-s bound))]
@@ -603,13 +651,11 @@
       (let [r (ev-postfix s (+ i 6) env)]
         (str-r (type-name r) (r-env r) (r-i r)))
 
+      ;; A bare identifier is just a lookup; `ev-postfix-rest` turns a
+      ;; following `(` into the call.
       (ident-start-cp? c)
-      (let [e (ident-end s i)
-            name (string-substring s i e)
-            j (ws s e)]
-        (if (at? s j 40)
-          (call-fn s (env-get env name) (+ j 1) env)
-          (with-i (env-get env name) e)))
+      (let [e (ident-end s i)]
+        (with-i (env-get env (string-substring s i e)) e))
 
       :else (err-r "SyntaxError: unexpected character" env i))))
 
@@ -635,6 +681,14 @@
               (ev-postfix-rest s (joined (member-of acc (value-text k))
                                          (with-i k (+ j 1))))
               (err-r "SyntaxError: expected ]" (r-env k) j)))))
+
+      ;; A call is a postfix too, which is the whole of method calls: after
+      ;; `.f` the accumulator IS the function value, so `o.f()` needs no
+      ;; separate rule. `this` is NOT bound -- a method runs as a plain
+      ;; function and cannot see its receiver.
+      (at? s i 40)
+      (let [r (call-fn s acc (+ i 1) (r-env acc))]
+        (if (err? r) r (ev-postfix-rest s r)))
 
       :else (with-i acc i))))
 
@@ -900,6 +954,36 @@
 ;; statements
 ;; ---------------------------------------------------------------------------
 
+(defn find-semi [s :string i :i64 depth :i64] :i64
+  (cond (< (cp s i) 0) -1
+        (= (cp s i) 40) (find-semi s (+ i 1) (+ depth 1))
+        (= (cp s i) 41) (if (<= depth 0) -1 (find-semi s (+ i 1) (- depth 1)))
+        (if (= (cp s i) 59) (= depth 0) false) i
+        :else (find-semi s (+ i 1) depth)))
+
+(defn close-paren [s :string i :i64 depth :i64] :i64
+  (cond (< (cp s i) 0) -1
+        (= (cp s i) 40) (close-paren s (+ i 1) (+ depth 1))
+        (= (cp s i) 41) (if (<= depth 1) i (close-paren s (+ i 1) (- depth 1)))
+        :else (close-paren s (+ i 1) depth)))
+
+;; The three clauses are found once and then re-read: the condition and the
+;; update are expressions at fixed indices and the body is a statement at a
+;; fixed index, exactly like `while`'s body. There is no separate loop scope,
+;; so `for (var i = ...)` leaves `i` bound afterwards -- which is what `var`
+;; does in a real engine too.
+(defn ex-for [s :string ci :i64 ui :i64 bi :i64 env :string] [:ref :js/r]
+  (let [c (ev-expr s ci env)]
+    (if (err? c)
+      c
+      (if (truthy? c)
+        (let [b (ex-stmt s bi (r-env c))]
+          (cond (err? b) b
+                (= (r-sig b) 1) b
+                :else (let [u (ev-expr s ui (r-env b))]
+                        (if (err? u) u (ex-for s ci ui bi (r-env u))))))
+        (undef-r (r-env c) (skip-stmt s bi))))))
+
 (defn ex-while [s :string ci :i64 env :string] [:ref :js/r]
   (let [c (ev-expr s ci env)]
     (if (err? c)
@@ -969,6 +1053,19 @@
 
       (word? s i "if") (ex-if s i env)
 
+      (word? s i "for")
+      (let [j (ws s (+ i 3))]
+        (if (at? s j 40)
+          (let [ini (ex-stmt s (+ j 1) env)]
+            (if (err? ini)
+              ini
+              (let [semi (find-semi s (r-i ini) 0)
+                    close (close-paren s j 0)]
+                (if (if (< semi 0) true (< close 0))
+                  (err-r "SyntaxError: a for statement needs init; condition; update" env j)
+                  (ex-for s (r-i ini) (+ semi 1) (+ close 1) (r-env ini))))))
+          (err-r "SyntaxError: expected ( after for" env j)))
+
       (word? s i "while")
       (let [j (ws s (+ i 5))]
         (if (at? s j 40)
@@ -979,7 +1076,7 @@
       (let [h (fn-header s i)]
         (if (< (r-i h) 0)
           (err-r "SyntaxError: malformed function declaration" env i)
-          (let [f (fn-r (r-env h) "")]
+          (let [f (fn-r (fn-text (r-env h) env) "")]
             (with-sig (undef-r (env-put env (r-s h) f)
                                (skip-braced s (r-i h) 0))
                       3))))
@@ -1037,7 +1134,11 @@
         (if (< (r-i h) 0)
           env
           (hoist src (skip-braced src (r-i h) 0)
-                 (env-put env (r-s h) (fn-r (r-env h) "")))))
+                 ;; Hoisting captures nothing: at hoist time the environment is
+                          ;; not built yet, and the caller tail covers what a
+                          ;; top-level function needs. The declaration statement
+                          ;; rebinds it with the real capture when it runs.
+                          (env-put env (r-s h) (fn-r (fn-text (r-env h) "") "")))))
       :else
       (let [next (skip-stmt src j)]
         (if (<= next j) env (hoist src next env))))))
@@ -1172,3 +1273,40 @@
   (num-is "function pair(a, b) { return [a, b]; } pair(3, 4)[1]" 4))
 (defn test-object-holds-function []
   (str-is "function f() { return 1; } var o = {g: f}; typeof o.g" "function"))
+
+;; --- for ------------------------------------------------------------------
+(defn test-for-loop [] (num-is "var t = 0; for (var i = 0; i < 5; i = i + 1) { t = t + 1; } t" 5))
+(defn test-for-sum [] (num-is "var t = 0; for (var i = 1; i <= 4; i = i + 1) { t = t + i; } t" 10))
+(defn test-for-no-iterations [] (num-is "var t = 9; for (var i = 0; i < 0; i = i + 1) { t = 0; } t" 9))
+(defn test-for-over-array []
+  (num-is "var a = [2, 4, 6]; var t = 0; for (var i = 0; i < a.length; i = i + 1) { t = t + a[i]; } t" 12))
+(defn test-for-nested []
+  (num-is "var t = 0; for (var i = 0; i < 3; i = i + 1) { for (var j = 0; j < 2; j = j + 1) { t = t + 1; } } t" 6))
+(defn test-for-return []
+  (num-is "function first(a) { for (var i = 0; i < a.length; i = i + 1) { return a[i]; } return 0; } first([7, 8])" 7))
+
+;; --- calls in postfix position --------------------------------------------
+(defn test-method-call []
+  (num-is "function f() { return 4; } var o = {m: f}; o.m()" 4))
+(defn test-method-with-args []
+  (num-is "function add(a, b) { return a + b; } var o = {plus: add}; o.plus(2, 3)" 5))
+(defn test-call-from-array []
+  (num-is "function f() { return 6; } var a = [f]; a[0]()" 6))
+(defn test-chained-call []
+  (num-is "function outer() { return inner; } function inner() { return 3; } outer()()" 3))
+(defn test-method-on-nested-object []
+  (num-is "function f() { return 11; } var o = {deep: {m: f}}; o.deep.m()" 11))
+
+;; --- closures --------------------------------------------------------------
+(defn test-closure-captures-parameter []
+  (num-is "function makeAdder(n) { function add(x) { return n + x; } return add; } makeAdder(5)(3)" 8))
+(defn test-closure-outlives-its-frame []
+  (num-is "function make() { var secret = 42; function peek() { return secret; } return peek; } var p = make(); p()" 42))
+(defn test-closure-shadows-caller []
+  (num-is "function make() { var v = 1; function get() { return v; } return get; } var g = make(); var v = 99; g()" 1))
+(defn test-closure-sees-outer-var []
+  (num-is "var base = 10; function f() { return base + 1; } f()" 11))
+(defn test-nested-function-declaration []
+  (num-is "function outer() { function inner(k) { return k * 3; } return inner(4); } outer()" 12))
+(defn test-nested-mutual-recursion []
+  (num-is "function outer(n) { function ev(k) { if (k == 0) { return 1; } return od(k - 1); } function od(k) { if (k == 0) { return 0; } return ev(k - 1); } return ev(n); } outer(4)" 1))
