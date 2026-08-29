@@ -85,18 +85,16 @@ only the two simplest tests pass at that setting.
   keyed by decimal index with its length carried in front. Entries are
   length-prefixed, so nesting one inside another needs no escaping. Lookup is
   a scan, and a property write prepends rather than rewrites.
-- **Closures capture BY VALUE.** A function value carries the environment that
-  existed where it was written, so a function returned out of another still
-  sees what it referred to. But environments here are immutable strings, so a
-  function that ASSIGNS to a captured name updates its own copy and the outer
-  binding does not move: `makeAdder` works, a stateful counter does not. The
-  differential harness records that exact program as a divergence rather than
-  leaving it to be found.
 - **A caller's bindings are still visible behind the capture.** Captured names
-  win, which is what makes it a closure, but a name in neither the capture nor
+  win, which is what makes it lexical, but a name in neither the capture nor
   the caller is the only ReferenceError. The tail is deliberate: it is what
   lets a function reach a sibling declared later, and itself, neither of which
   a snapshot taken at declaration time can contain.
+- **Cells are never freed.** The cell region only grows, because a cell id is
+  its length at allocation and reuse would hand the same number out twice. A
+  long-running program bounded by the 64 KiB string ceiling will reach it; a
+  page script will not. Freeing needs a reachability pass this engine has no
+  reason to run yet.
 - **A method does not see its receiver.** `o.f()` calls `f`; there is no
   `this`.
 - **Numbers are i64, not IEEE-754 doubles.** This is the one recorded

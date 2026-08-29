@@ -96,7 +96,12 @@
             test-try-without-throw test-catch-reference-error
             test-catch-type-error test-try-continues-after
             test-throw-from-function test-catch-inside-function
-            test-nested-try test-throw-object])
+            test-nested-try test-throw-object
+            test-counter-keeps-state test-two-closures-share-one-cell
+            test-callee-mutates-callers-variable test-loop-closures-share-var
+            test-function-expression test-function-expression-immediate
+            test-function-expression-in-array test-named-function-expression
+            test-declaration-needs-a-name])
 
   (:schemas
    {:js/r [:record :js/r
@@ -175,7 +180,7 @@
 ;; error (ReferenceError, SyntaxError, TypeError) leaves at 0 and whose `:s`
 ;; is its message. Both are catchable, as they are in a real engine.
 (defn throw-r [v [:ref :js/r] env :string i :i64] [:ref :js/r]
-  (record-new [:ref :js/r] :error 1 (env-put "" "v" v) env 2 i))
+  (record-new [:ref :js/r] :error 1 (entry-put "" "v" v) env 2 i))
 
 ;; ---------------------------------------------------------------------------
 ;; characters
@@ -235,7 +240,7 @@
     (r-n (scan-digits t 0 0))))
 
 ;; ---------------------------------------------------------------------------
-;; environment: <name>=<type-char><text-length>:<text>\n , newest first
+;; environment: two regions, `<bindings-length>:<bindings><cells>`
 ;; ---------------------------------------------------------------------------
 
 (defn type-char [t :keyword] :string
@@ -284,13 +289,50 @@
         (= (r-t x) :array) (r-s x)
         :else (value-text x)))
 
-(defn env-put [env :string name :string x [:ref :js/r]] :string
+;; BINDINGS map a name to a CELL id; CELLS map a cell id to a value. Both use
+;; the same length-prefixed entry format and both are prepend-newest.
+;;
+;; The split is what makes a closure capture by REFERENCE. A function value
+;; carries only the BINDINGS it was written under -- names to cell ids -- and
+;; the cells travel with the running program, out of a call and back into its
+;; caller. Two closures over the same variable therefore name the same cell,
+;; and an assignment through one is seen through the other even after the
+;; frame that declared it has returned.
+;;
+;; A cell id is the length of the cells region when it is allocated. That
+;; region only grows, by prepending, so the number is never handed out twice.
+;;
+;; `var`/`let`/`const` and parameters ALLOCATE (`env-put`: a fresh cell, which
+;; shadows). A plain assignment MUTATES (`env-set`: same cell, new value).
+;; That is the distinction a real engine draws, and it is the whole reason a
+;; counter works.
+
+(defn entry-put [region :string k :string x [:ref :js/r]] :string
   (let [body (stored-text x)]
     (string-concat
-     (string-concat name "=")
+     (string-concat k "=")
      (string-concat
       (string-concat (type-char (r-t x)) (string-from-i64 (string-length body)))
-      (string-concat ":" (string-concat body (string-concat env "")))))))
+      (string-concat ":" (string-concat body region))))))
+
+(defn env-make [bindings :string cells :string] :string
+  (string-concat (string-from-i64 (string-length bindings))
+                 (string-concat ":" (string-concat bindings cells))))
+
+(defn env-bindings [env :string] :string
+  (let [d (scan-digits env 0 0)
+        start (+ (r-i d) 1)]
+    (if (> (+ start (r-n d)) (string-length env))
+      ""
+      (string-substring env start (+ start (r-n d))))))
+
+(defn env-cells [env :string] :string
+  (let [d (scan-digits env 0 0)
+        start (+ (r-i d) 1)
+        end (+ start (r-n d))]
+    (if (> end (string-length env))
+      ""
+      (string-substring env end (string-length env)))))
 
 ;; The newline that ends an entry is written by env-put's caller shape above:
 ;; body is followed directly by the rest of the environment, so entries are
@@ -332,7 +374,29 @@
           (decode-at s (+ e 1) name env)
           (env-find s (entry-end s (+ e 1)) name env))))))
 
-(defn env-get [env :string name :string] [:ref :js/r] (env-find env 0 name env))
+;; A binding holds the cell id as a number; -1 means the name is not bound.
+(defn cell-id-of [env :string name :string] :i64
+  (let [b (env-find (env-bindings env) 0 name "")]
+    (if (err? b) -1 (r-n b))))
+
+(defn env-put [env :string name :string x [:ref :js/r]] :string
+  (let [cells (env-cells env)
+        id (string-length cells)]
+    (env-make (entry-put (env-bindings env) name (num-r id "" 0))
+              (entry-put cells (string-from-i64 id) x))))
+
+(defn env-set [env :string name :string x [:ref :js/r]] :string
+  (let [id (cell-id-of env name)]
+    (if (< id 0)
+      (env-put env name x)
+      (env-make (env-bindings env)
+                (entry-put (env-cells env) (string-from-i64 id) x)))))
+
+(defn env-get [env :string name :string] [:ref :js/r]
+  (let [id (cell-id-of env name)]
+    (if (< id 0)
+      (err-r (string-concat "ReferenceError: " name) env 0)
+      (with-env (member-get (env-cells env) (string-from-i64 id)) env))))
 
 ;; ---------------------------------------------------------------------------
 ;; objects and arrays, over the same entry format
@@ -357,11 +421,11 @@
 
 (defn arr-put [x [:ref :js/r] i :i64 v [:ref :js/r]] [:ref :js/r]
   (arr-r (arr-text (if (>= i (arr-len x)) (+ i 1) (arr-len x))
-                   (env-put (arr-entries x) (string-from-i64 i) v))
+                   (entry-put (arr-entries x) (string-from-i64 i) v))
          ""))
 
 (defn obj-put [x [:ref :js/r] k :string v [:ref :js/r]] [:ref :js/r]
-  (obj-r (env-put (r-s x) k v) ""))
+  (obj-r (entry-put (r-s x) k v) ""))
 
 ;; A member read is the same operation on either container: an array's keys
 ;; are decimal indices, and `length` is the only name it answers itself.
@@ -517,16 +581,10 @@
                  captured)
         ""))
 
-;; A function's text is `<params-start>,<body-start>,<len>:<captured-env>`.
-;; The captured environment is what makes a closure: it is the environment
-;; that existed where the function was WRITTEN, carried inside the value, so a
-;; function returned out of another still sees what it referred to.
-;;
-;; Capture is BY VALUE. Environments here are immutable strings, so a function
-;; that assigns to a captured name updates its own copy and the outer binding
-;; does not move. `makeAdder` works; a stateful counter does not, and the
-;; differential harness records exactly that as a divergence rather than
-;; leaving it to be discovered.
+;; A function's text is `<params-start>,<body-start>,<len>:<captured-bindings>`.
+;; It captures BINDINGS -- names to cell ids -- and never cells. The cells
+;; travel with the running program, so calling this function later reaches the
+;; same cells the surrounding code is still using: capture is BY REFERENCE.
 (defn fn-text [pb :string captured :string] :string
   (string-concat pb
                  (string-concat ","
@@ -562,12 +620,12 @@
     (if (at? src p 41)
       ;; No parameters left: consume any remaining arguments, then the `)`.
       (if (at? src a 41)
-        (r-mk :string 0 target "" (+ a 1))
+        (r-mk :string 0 target caller (+ a 1))
         (let [v (ev-expr src a caller)]
           (if (err? v)
             v
             (let [j (ws src (r-i v))]
-              (bind-args src p (if (at? src j 44) (+ j 1) j) caller target)))))
+              (bind-args src p (if (at? src j 44) (+ j 1) j) (r-env v) target)))))
       (if (ident-start-cp? (cp src p))
         (let [pe (ident-end src p)
               name (string-substring src p pe)
@@ -622,15 +680,24 @@
     (err-r "TypeError: value is not a function" env ai)
 
     :else
+    ;; The callee sees the function's captured BINDINGS in front of the
+    ;; caller's, and SHARES the caller's cells. On return the caller keeps its
+    ;; own bindings and takes the callee's cells: that is how an assignment
+    ;; inside the function reaches a variable the caller still holds, and how
+    ;; two closures over one variable stay in step.
     (let [base (hoist src (+ (fn-body-start f) 1)
                       ;; `this` sits between the parameters -- which bind-args
                       ;; prepends -- and the capture, so a parameter named
                       ;; `this` shadows it and a captured name never does.
-                      (env-put (string-concat (fn-env f) env) "this" recv))
+                      (env-put (env-make (string-concat (fn-env f) (env-bindings env))
+                                         (env-cells env))
+                               "this" recv))
           bound (bind-args src (+ (fn-params-start f) 1) ai env base)]
       (if (err? bound)
         bound
-        (let [out (ex-stmt src (fn-body-start f) (r-s bound))]
+        (let [out (ex-stmt src (fn-body-start f) (r-s bound))
+              ;; the caller's own bindings, advanced to the callee's cells
+              env (env-make (env-bindings (r-env bound)) (env-cells (r-env out)))]
           (cond (err? out) out
                   ;; The callee's `return` signal must be CLEARED here. It says
                   ;; "stop running the function", and leaving it set makes
@@ -665,7 +732,7 @@
           v
           (let [j (ws s (r-i v))]
             (ev-array s (if (at? s j 44) (+ j 1) j) (r-env v) (+ n 1)
-                      (env-put acc (string-from-i64 n) v))))))))
+                      (entry-put acc (string-from-i64 n) v))))))))
 
 (defn ev-object [s :string i0 :i64 env :string acc :string] [:ref :js/r]
   (let [i (ws s i0)]
@@ -681,7 +748,7 @@
                   v
                   (let [j (ws s (r-i v))]
                     (ev-object s (if (at? s j 44) (+ j 1) j) (r-env v)
-                               (env-put acc (r-s k) v)))))
+                               (entry-put acc (r-s k) v)))))
               (err-r "SyntaxError: expected : in an object literal" env c))))))))
 
 ;; ---------------------------------------------------------------------------
@@ -697,7 +764,7 @@
           v
           (let [j (ws s (r-i v))]
             (ev-args-array s (if (at? s j 44) (+ j 1) j) (r-env v) (+ n 1)
-                           (env-put acc (string-from-i64 n) v))))))))
+                           (entry-put acc (string-from-i64 n) v))))))))
 
 (defn arg-at [args [:ref :js/r] i :i64] [:ref :js/r] (arr-at args i))
 
@@ -738,12 +805,12 @@
   (let [hit (str-index-of hay sep i)]
     (if (< hit 0)
       (arr-r (arr-text (+ n 1)
-                       (env-put acc (string-from-i64 n)
-                                (str-r (string-substring hay i (string-length hay)) "" 0)))
+                       (entry-put acc (string-from-i64 n)
+                                  (str-r (string-substring hay i (string-length hay)) "" 0)))
              "")
       (str-split hay sep (+ hit (string-length sep)) (+ n 1)
-                 (env-put acc (string-from-i64 n)
-                          (str-r (string-substring hay i hit) "" 0))))))
+                 (entry-put acc (string-from-i64 n)
+                            (str-r (string-substring hay i hit) "" 0))))))
 
 (defn call-array-builtin [name :string recv [:ref :js/r] args [:ref :js/r]] [:ref :js/r]
   (cond
@@ -804,6 +871,16 @@
             (if (at? s j 41)
               (with-i r (+ j 1))
               (err-r "SyntaxError: expected )" (r-env r) j)))))
+
+      ;; A function EXPRESSION. `ex-stmt` claims a statement that starts with
+      ;; `function` as a declaration before this is ever reached, so the two
+      ;; forms do not compete -- the same split a real engine makes.
+      (word? s i "function")
+      (let [h (fn-header s i)]
+        (if (< (r-i h) 0)
+          (err-r "SyntaxError: malformed function expression" env i)
+          (with-i (with-env (fn-r (fn-text (r-env h) (env-bindings env)) "") env)
+                  (skip-braced s (r-i h) 0))))
 
       (= c 91) (ev-array s (+ i 1) env 0 "")
       (= c 123) (ev-object s (+ i 1) env "")
@@ -1054,7 +1131,7 @@
               (let [updated (stored-with base (value-text k) v)]
                 (if (err? updated)
                   updated
-                  (with-env v (env-put (r-env v) name updated)))))))))))
+                  (with-env v (env-set (r-env v) name updated)))))))))))
 
 (defn ev-expr [s :string i0 :i64 env :string] [:ref :js/r]
   (let [i (ws s i0)
@@ -1065,7 +1142,7 @@
       (>= e 0) (let [name (string-substring s i e)
                      j (ws s e)
                      v (ev-expr s (+ j 1) env)]
-                 (if (err? v) v (with-env v (env-put (r-env v) name v))))
+                 (if (err? v) v (with-env v (env-set (r-env v) name v))))
       (>= d 0) (ev-member-assign s i env d)
       (>= x 0) (ev-member-assign s i env x)
       :else (ev-or s i env))))
@@ -1109,21 +1186,23 @@
 ;; The two indices a function needs to run again: where its parameter list
 ;; opens and where its body block opens. Answers -1 for `:i` when the shape is
 ;; not a declaration, so the caller can report the syntax error in context.
+;; The name is optional, which is the only difference between a function
+;; DECLARATION and a function EXPRESSION. An anonymous header answers with an
+;; empty name; a declaration rejects that, an expression does not care.
 (defn fn-header [s :string i :i64] [:ref :js/r]
-  (let [j (ws s (+ i 8))]
-    (if (ident-start-cp? (cp s j))
-      (let [e (ident-end s j)
-            name (string-substring s j e)
-            k (ws s e)]
-        (if (at? s k 40)
-          (let [b (ws s (skip-params s (+ k 1)))]
-            (if (at? s b 123)
-              (r-mk :string 0 name (string-concat (string-from-i64 k)
-                                                  (string-concat "," (string-from-i64 b)))
-                    b)
-              (r-mk :string 0 name "" -1)))
+  (let [j (ws s (+ i 8))
+        named (ident-start-cp? (cp s j))
+        e (if named (ident-end s j) j)
+        name (if named (string-substring s j e) "")
+        k (ws s e)]
+    (if (at? s k 40)
+      (let [b (ws s (skip-params s (+ k 1)))]
+        (if (at? s b 123)
+          (r-mk :string 0 name (string-concat (string-from-i64 k)
+                                              (string-concat "," (string-from-i64 b)))
+                b)
           (r-mk :string 0 name "" -1)))
-      (r-mk :string 0 "" "" -1))))
+      (r-mk :string 0 name "" -1))))
 
 (defn eat-semi [s :string i0 :i64] :i64
   (let [i (ws s i0)] (if (at? s i 59) (+ i 1) i)))
@@ -1288,9 +1367,9 @@
 
       (word? s i "function")
       (let [h (fn-header s i)]
-        (if (< (r-i h) 0)
-          (err-r "SyntaxError: malformed function declaration" env i)
-          (let [f (fn-r (fn-text (r-env h) env) "")]
+        (if (if (< (r-i h) 0) true (string=? (r-s h) ""))
+          (err-r "SyntaxError: a function declaration needs a name" env i)
+          (let [f (fn-r (fn-text (r-env h) (env-bindings env)) "")]
             (with-sig (undef-r (env-put env (r-s h) f)
                                (skip-braced s (r-i h) 0))
                       3))))
@@ -1577,3 +1656,25 @@
   (num-is "try { try { throw 1; } catch (a) { throw a + 1; } } catch (b) { b }" 2))
 (defn test-throw-object []
   (num-is "try { throw {code: 4}; } catch (e) { e.code }" 4))
+
+;; --- capture by reference --------------------------------------------------
+(defn test-counter-keeps-state []
+  (num-is "function make() { var c = 0; function inc() { c = c + 1; return c; } return inc; } var f = make(); f(); f()" 2))
+(defn test-two-closures-share-one-cell []
+  (num-is "function make() { var c = 0; function inc() { c = c + 1; return c; } function get() { return c; } inc(); inc(); return get(); } make()" 2))
+(defn test-callee-mutates-callers-variable []
+  (num-is "var n = 1; function bump() { n = n + 10; } bump(); bump(); n" 21))
+(defn test-loop-closures-share-var []
+  (num-is "var fs = []; for (var i = 0; i < 3; i = i + 1) { fs[i] = function() { return i; }; } fs[0]()" 3))
+
+;; --- function expressions --------------------------------------------------
+(defn test-function-expression []
+  (num-is "var f = function(a) { return a * 2; }; f(4)" 8))
+(defn test-function-expression-immediate []
+  (num-is "(function() { return 6; })()" 6))
+(defn test-function-expression-in-array []
+  (num-is "var a = [function() { return 5; }]; a[0]()" 5))
+(defn test-named-function-expression []
+  (num-is "var f = function helper(n) { return n + 1; }; f(1)" 2))
+(defn test-declaration-needs-a-name []
+  (type-is "function () { return 1; }" "error"))

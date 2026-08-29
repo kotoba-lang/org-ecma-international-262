@@ -174,7 +174,21 @@
    "function bad() { throw 8; } try { bad() } catch (e) { e }"
    "function safe() { try { throw 2; } catch (e) { return e + 1; } } safe()"
    "try { try { throw 1; } catch (a) { throw a + 1; } } catch (b) { b }"
-   "try { throw {code: 4}; } catch (e) { e.code }"])
+   "try { throw {code: 4}; } catch (e) { e.code }"
+   ;; closures capture by REFERENCE
+   "function make() { var c = 0; function inc() { c = c + 1; return c; } return inc; } var f = make(); f(); f()"
+   "function make() { var c = 0; function inc() { c = c + 1; return c; } function get() { return c; } inc(); inc(); return get(); } make()"
+   "var n = 1; function bump() { n = n + 10; } bump(); bump(); n"
+   "function outer() { var v = 0; function set() { v = 9; } set(); return v; } outer()"
+   "var fs = []; for (var i = 0; i < 3; i = i + 1) { fs[i] = function() { return i; }; } fs[0]()"
+   "function counter() { var c = 0; return function() { c = c + 1; return c; }; }"
+   "function mk(n) { function add(x) { return n + x; } return add; } var a = mk(5); a(3) + a(4)"
+   ;; function expressions
+   "var f = function(a) { return a * 2; }; f(4)"
+   "(function() { return 6; })()"
+   "var a = [function() { return 5; }]; a[0]()"
+   "var f = function helper(n) { return n + 1; }; f(1)"
+   "var o = {m: function() { return 3; }}; o.m()"])
 
 (def known-divergences
   "Cases where this engine and a real one genuinely disagree, each with the
@@ -184,9 +198,7 @@
    "try { nope } catch (e) { typeof e }"
    "an INTERNAL error (ReferenceError, TypeError, SyntaxError) is caught as its MESSAGE STRING here. A real engine throws an Error OBJECT, which this engine has no constructor for. A thrown value keeps its own type -- `throw 42` catches a number -- so only the internal ones differ."
    "function f() { return typeof this; } f()"
-   "a plain call has no receiver here, so `this` is undefined. A real engine in sloppy mode substitutes the GLOBAL object, which this engine does not have at all -- there is no globalThis to name."
-   "function make() { var c = 0; function inc() { c = c + 1; return c; } return inc; } var f = make(); f(); f()"
-   "closures capture BY VALUE: environments here are immutable strings, so inc updates its own copy and the outer c does not move. A read-only capture (makeAdder) agrees; a stateful counter does not."})
+   "a plain call has no receiver here, so `this` is undefined. A real engine in sloppy mode substitutes the GLOBAL object, which this engine does not have at all -- there is no globalThis to name."})
 
 (defn host-eval
   "The real engine's answer, as the text this engine would print.
