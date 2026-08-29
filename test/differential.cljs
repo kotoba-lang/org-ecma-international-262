@@ -259,7 +259,26 @@
    "var x = 1; ++x; x"
    "var x = 5; var y = ++x; y"
    "var x = 5; x--; x"
-   "try { nope += 1; 'no-throw' } catch (e) { e.name }"])
+   "try { nope += 1; 'no-throw' } catch (e) { e.name }"
+   ;; for...of / for...in
+   "var out = ''; for (var x of [1, 2, 3]) { out = out + x; } out"
+   "var t = 0; for (var x of [4, 5, 6]) { t += x; } t"
+   "var out = ''; for (var s of ['a', 'b']) { out += s; } out"
+   "var t = 0; for (var x of [1, 2, 3, 4]) { if (x == 3) { break; } t += x; } t"
+   "var o = {a: 1, b: 2}; var out = ''; for (var k in o) { out += k; } out"
+   "var o = {}; o.x = 1; o.y = 2; o.z = 3; var out = ''; for (var k in o) { out += k; } out"
+   "var out = ''; for (var i in ['a', 'b']) { out += i; } out"
+   "var o = {a: 1, b: 2}; o.a = 9; var out = ''; for (var k in o) { out += k; } out"
+   ;; switch
+   "var t = 0; switch (2) { case 1: t = 10; break; case 2: t = 20; break; } t"
+   "var t = 0; switch (1) { case 1: t = t + 1; case 2: t = t + 10; break; case 3: t = t + 100; } t"
+   "var t = 0; switch (9) { case 1: t = 1; break; default: t = 99; } t"
+   "var t = 0; switch (3) { case 1: t = 1; break; default: t = 99; break; case 3: t = 3; break; } t"
+   "var t = 0; switch ('1') { case 1: t = 1; break; default: t = 2; } t"
+   "var t = 7; switch (5) { case 1: t = 1; break; } t"
+   "var t = 0; for (var i = 0; i < 3; i++) { switch (i) { case 1: break; } t++; } t"
+   "function f(x) { switch (x) { case 1: return 'one'; default: return 'other'; } } f(1) + f(2)"
+   "var o = ''; switch ('b') { case 'a': o = 'A'; break; case 'b': o = 'B'; break; } o"])
 
 (def known-divergences
   "Cases where this engine and a real one genuinely disagree, each with the

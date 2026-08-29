@@ -132,6 +132,11 @@
             test-dom-fire-the-second-handler test-dom-handler-sees-its-capture
             test-dom-unknown-handler-is-an-error
             test-dom-registration-is-not-the-handlers-effect
+            test-switch-matches test-switch-falls-through test-switch-break-stops
+            test-switch-default test-switch-default-in-the-middle
+            test-switch-is-strict test-switch-no-match-no-default
+            test-switch-break-leaves-only-the-switch test-switch-return
+            test-switch-on-strings
             test-error-message test-error-name test-error-is-an-object
             test-thrown-value-is-not-wrapped test-type-error-name
             test-ternary-true test-ternary-false test-ternary-nested-in-arg
@@ -1932,6 +1937,104 @@
             (undef-r (r-env c) (skip-stmt s (+ j 1))))
           (err-r "SyntaxError: expected ) after while condition" (r-env c) j))))))
 
+;; --- switch ----------------------------------------------------------------
+;;
+;; Fallthrough is the whole of the difficulty: the clause that matches runs on
+;; into the NEXT clause's statements until a `break`. So this is two passes --
+;; find where to start, then run from there, STEPPING OVER any clause header
+;; it meets rather than treating it as a statement.
+
+;; Just past `case <expr> :` or `default :` at `i`, or -1 when `i` is not at a
+;; clause header. `skip-expr` stops at a `:` at depth 0, so a `?:` inside a
+;; case expression is stepped over with its own parens and brackets.
+(defn clause-header-end [s :string i :i64] :i64
+  (let [j (ws s i)]
+    (cond
+      (word? s j "case")
+      (let [e (skip-expr s (+ j 4) 0)] (if (at? s e 58) (+ e 1) -1))
+      (word? s j "default")
+      (let [k (ws s (+ j 7))] (if (at? s k 58) (+ k 1) -1))
+      :else -1)))
+
+;; Past a clause's statements to the next header or the closing brace, without
+;; running any of them: this is how the search reaches the next `case`.
+(defn skip-clause [s :string i :i64] :i64
+  (let [j (ws s i)]
+    (cond
+      (< (cp s j) 0) j
+      (at? s j 125) j
+      (>= (clause-header-end s j) 0) j
+      :else (let [n (skip-stmt s j)] (if (<= n j) j (skip-clause s n))))))
+
+;; Where to start running, in `:n`: the first `case` whose value is `===` the
+;; discriminant, else `default`'s body, else -1. `default` does not stop the
+;; search -- a real engine uses it only when no case matches, wherever it
+;; sits. Case expressions are evaluated in order and their environment is
+;; threaded, because they may have effects.
+(defn switch-target [s :string i :i64 d [:ref :js/r] fb :i64] [:ref :js/r]
+  (let [j (ws s i)]
+    (cond
+      (< (cp s j) 0) (num-r fb (r-env d) 0)
+      (at? s j 125) (num-r fb (r-env d) 0)
+
+      (word? s j "case")
+      (let [v (ev-expr s (+ j 4) (r-env d))]
+        (if (err? v)
+          v
+          (let [e (ws s (r-i v))]
+            (if (at? s e 58)
+              (if (truthy? (binop 12 d v))
+                (num-r (+ e 1) (r-env v) 0)
+                (switch-target s (skip-clause s (+ e 1)) (with-env d (r-env v)) fb))
+              (err-r "SyntaxError: expected : after case" (r-env v) e)))))
+
+      (word? s j "default")
+      (let [k (ws s (+ j 7))]
+        (if (at? s k 58)
+          (switch-target s (skip-clause s (+ k 1)) d (+ k 1))
+          (err-r "SyntaxError: expected : after default" (r-env d) k)))
+
+      :else (err-r "SyntaxError: expected case or default in switch" (r-env d) j))))
+
+;; `end` is the index just past the switch's closing brace, so `break` knows
+;; where to land. A `break` here leaves the SWITCH, not an enclosing loop --
+;; which is why the signal is cleared instead of being passed on, while
+;; `continue` (5) and `return` (1) are passed on untouched.
+(defn switch-run [s :string i :i64 acc [:ref :js/r] end :i64] [:ref :js/r]
+  (let [j (ws s i)
+        h (clause-header-end s j)]
+    (cond
+      (< (cp s j) 0) (err-r "SyntaxError: expected } to close switch" (r-env acc) j)
+      (at? s j 125) (with-i acc (+ j 1))
+      (>= h 0) (switch-run s h acc end)
+      :else
+      (let [r (ex-stmt s j (r-env acc))]
+        (cond (err? r) r
+              (= (r-sig r) 1) r
+              (= (r-sig r) 4) (undef-r (r-env r) end)
+              (= (r-sig r) 5) r
+              :else (switch-run s (r-i r) r end))))))
+
+(defn ex-switch [s :string i :i64 env :string] [:ref :js/r]
+  (let [j (ws s (+ i 6))]
+    (if (at? s j 40)
+      (let [d (ev-expr s (+ j 1) env)]
+        (if (err? d)
+          d
+          (let [k (ws s (r-i d))]
+            (if (at? s k 41)
+              (let [b (ws s (+ k 1))]
+                (if (at? s b 123)
+                  (let [end (skip-braced s b 0)
+                        t (switch-target s (+ b 1) d -1)]
+                    (cond (err? t) t
+                          (< (r-n t) 0) (undef-r (r-env t) end)
+                          :else (switch-run s (r-n t)
+                                            (undef-r (r-env t) (r-n t)) end)))
+                  (err-r "SyntaxError: expected { after switch (...)" (r-env d) b)))
+              (err-r "SyntaxError: expected ) after switch discriminant" (r-env d) k)))))
+      (err-r "SyntaxError: expected ( after switch" env j))))
+
 (defn ex-if [s :string i :i64 env :string] [:ref :js/r]
   (let [j (ws s (+ i 2))]
     (if (at? s j 40)
@@ -2070,6 +2173,8 @@
                   (err-r "SyntaxError: a for statement needs init; condition; update" env j)
                   (ex-for s (r-i ini) (+ semi 1) (+ close 1) (r-env ini)))))))
           (err-r "SyntaxError: expected ( after for" env j)))
+
+      (word? s i "switch") (ex-switch s i env)
 
       (word? s i "while")
       (let [j (ws s (+ i 5))]
@@ -2679,3 +2784,29 @@
                  (dom-entry (dom-entry "" "btn" "") "out" "before")
                  0)
                 "") 1 0))
+
+;; --- switch ---------------------------------------------------------------
+(defn test-switch-matches []
+  (num-is "var t = 0; switch (2) { case 1: t = 10; break; case 2: t = 20; break; } t" 20))
+;; No `break` means the next clause runs too. That is the behaviour, not a bug.
+(defn test-switch-falls-through []
+  (num-is "var t = 0; switch (1) { case 1: t = t + 1; case 2: t = t + 10; break; case 3: t = t + 100; } t" 11))
+(defn test-switch-break-stops []
+  (num-is "var t = 0; switch (1) { case 1: t = 1; break; case 2: t = 2; } t" 1))
+(defn test-switch-default []
+  (num-is "var t = 0; switch (9) { case 1: t = 1; break; default: t = 99; } t" 99))
+;; `default` is used only when nothing matched, wherever it sits.
+(defn test-switch-default-in-the-middle []
+  (num-is "var t = 0; switch (3) { case 1: t = 1; break; default: t = 99; break; case 3: t = 3; break; } t" 3))
+;; Matching is `===`, so a string does not match a number.
+(defn test-switch-is-strict []
+  (num-is "var t = 0; switch ('1') { case 1: t = 1; break; default: t = 2; } t" 2))
+(defn test-switch-no-match-no-default []
+  (num-is "var t = 7; switch (5) { case 1: t = 1; break; } t" 7))
+;; `break` inside a switch leaves the SWITCH; the loop keeps going.
+(defn test-switch-break-leaves-only-the-switch []
+  (num-is "var t = 0; for (var i = 0; i < 3; i++) { switch (i) { case 1: break; } t++; } t" 3))
+(defn test-switch-return []
+  (str-is "function f(x) { switch (x) { case 1: return 'one'; default: return 'other'; } } f(1) + f(2)" "oneother"))
+(defn test-switch-on-strings []
+  (str-is "var o = ''; switch ('b') { case 'a': o = 'A'; break; case 'b': o = 'B'; break; } o" "B"))
