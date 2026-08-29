@@ -188,7 +188,24 @@
    "(function() { return 6; })()"
    "var a = [function() { return 5; }]; a[0]()"
    "var f = function helper(n) { return n + 1; }; f(1)"
-   "var o = {m: function() { return 3; }}; o.m()"])
+   "var o = {m: function() { return 3; }}; o.m()"
+   ;; conditional expression and real short-circuit
+   "1 < 2 ? 10 : 20"
+   "1 > 2 ? 10 : 20"
+   "function id(x) { return x; } id(1 ? 4 : 5)"
+   "var t = 0; function bump() { t = t + 1; return 0; } var r = true ? 7 : bump(); r + t"
+   "var t = 0; function bump() { t = t + 1; return 1; } var r = false && bump(); t"
+   "var t = 0; function bump() { t = t + 1; return 1; } var r = true || bump(); t"
+   "var a = 1; var b = a > 0 ? 'pos' : 'neg'; b"
+   ;; push / pop
+   "var a = [1]; a.push(2); a[1]"
+   "var a = [1, 2]; a.push(3)"
+   "var a = []; for (var i = 0; i < 4; i = i + 1) { a.push(i); } a.length"
+   "var a = []; for (var i = 0; i < 4; i = i + 1) { a.push(i); } a.join('-')"
+   "var a = [1, 2, 3]; a.pop(); a.length"
+   "var a = [1, 2, 3]; a.pop()"
+   "var a = []; function add(v) { a.push(v); } add(1); add(2); a.length"
+   "[1, 2].push(3)"])
 
 (def known-divergences
   "Cases where this engine and a real one genuinely disagree, each with the

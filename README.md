@@ -90,6 +90,13 @@ only the two simplest tests pass at that setting.
   the caller is the only ReferenceError. The tail is deliberate: it is what
   lets a function reach a sibling declared later, and itself, neither of which
   a snapshot taken at declaration time can contain.
+- **A wasm32 module may carry at most 256 typed literals** (`browser-host.mjs`
+  rejects more with `too many typed ABI literals`). The engine is comfortably
+  under it; the build that also carries the 156 test functions — each holding
+  its JavaScript source as a string — is not. So the tests are exercised on
+  the restricted-ESM artifact, which has no such ceiling, and the engine's
+  wasm32 artifact is verified to instantiate and run separately. Splitting the
+  test build into chunks would restore in-wasm test runs and has not been done.
 - **Cells are never freed.** The cell region only grows, because a cell id is
   its length at allocation and reuse would hand the same number out twice. A
   long-running program bounded by the 64 KiB string ceiling will reach it; a

@@ -101,7 +101,13 @@
             test-callee-mutates-callers-variable test-loop-closures-share-var
             test-function-expression test-function-expression-immediate
             test-function-expression-in-array test-named-function-expression
-            test-declaration-needs-a-name])
+            test-declaration-needs-a-name
+            test-ternary-true test-ternary-false test-ternary-nested-in-arg
+            test-ternary-skips-the-untaken-arm test-and-short-circuits
+            test-or-short-circuits
+            test-push test-push-returns-length test-push-in-loop
+            test-pop test-pop-returns-last test-push-through-closure
+            test-push-on-a-literal])
 
   (:schemas
    {:js/r [:record :js/r
@@ -430,7 +436,9 @@
 ;; A member read is the same operation on either container: an array's keys
 ;; are decimal indices, and `length` is the only name it answers itself.
 (defn array-method? [k :string] :bool
-  (cond (string=? k "join") true
+  (cond (string=? k "push") true
+        (string=? k "pop") true
+        (string=? k "join") true
         (string=? k "indexOf") true
         (string=? k "includes") true
         (string=? k "slice") true
@@ -913,7 +921,13 @@
 
 ;; `.name` and `[expr]` bind tighter than any operator, so they form their own
 ;; level between a primary and multiplication.
-(defn ev-postfix-rest [s :string acc [:ref :js/r] recv [:ref :js/r]] [:ref :js/r]
+;; `bname` is the identifier the chain STARTED at, or "" when it did not start
+;; at one. A mutating method needs it: values are persistent, so `a.push(x)`
+;; builds a new array and writes it back to the CELL `a` names. Because a cell
+;; is shared, that write is seen through every closure over `a` -- which is
+;; why push could not exist before capture became by reference.
+(defn ev-postfix-rest [s :string acc [:ref :js/r] recv [:ref :js/r] bname :string]
+  [:ref :js/r]
   (let [i (ws s (r-i acc))]
     (cond
       (at? s i 46)
@@ -922,7 +936,7 @@
           (let [e (ident-end s j)]
             (ev-postfix-rest s (joined (member-of acc (string-substring s j e))
                                        (with-i acc e))
-                             acc))
+                             acc bname))
           (err-r "SyntaxError: expected a property name after ." (r-env acc) j)))
 
       (at? s i 91)
@@ -933,7 +947,7 @@
             (if (at? s j 93)
               (ev-postfix-rest s (joined (member-of acc (value-text k))
                                          (with-i k (+ j 1)))
-                               acc)
+                               acc bname)
               (err-r "SyntaxError: expected ]" (r-env k) j)))))
 
       ;; A call is a postfix too, which is the whole of method calls: after
@@ -941,14 +955,42 @@
       ;; separate rule. `this` is NOT bound -- a method runs as a plain
       ;; function and cannot see its receiver.
       (at? s i 40)
-      (let [r (call-fn s acc (+ i 1) (r-env acc) recv)]
-        (if (err? r) r (ev-postfix-rest s r (undef-r "" 0))))
+      (cond
+        (if (= (r-t acc) :builtin) (string=? (r-s acc) "push") false)
+        (let [args (ev-args-array s (+ i 1) (r-env acc) 0 "")]
+          (if (err? args)
+            args
+            (let [nu (arr-put recv (arr-len recv) (arr-at args 0))
+                  e2 (if (string=? bname "")
+                       (r-env args)
+                       (env-set (r-env args) bname nu))]
+              (ev-postfix-rest s (with-i (with-env (num-r (arr-len nu) "" 0) e2) (r-i args))
+                               (undef-r "" 0) ""))))
+
+        (if (= (r-t acc) :builtin) (string=? (r-s acc) "pop") false)
+        (let [args (ev-args-array s (+ i 1) (r-env acc) 0 "")]
+          (if (err? args)
+            args
+            (let [n (arr-len recv)
+                  out (if (<= n 0) (undef-r "" 0) (arr-at recv (- n 1)))
+                  nu (arr-r (arr-text (if (<= n 0) 0 (- n 1)) (arr-entries recv)) "")
+                  e2 (if (string=? bname "")
+                       (r-env args)
+                       (env-set (r-env args) bname nu))]
+              (ev-postfix-rest s (with-i (with-env out e2) (r-i args))
+                               (undef-r "" 0) ""))))
+
+        :else
+        (let [r (call-fn s acc (+ i 1) (r-env acc) recv)]
+          (if (err? r) r (ev-postfix-rest s r (undef-r "" 0) ""))))
 
       :else (with-i acc i))))
 
-(defn ev-postfix [s :string i :i64 env :string] [:ref :js/r]
-  (let [r (ev-primary s i env)]
-    (if (err? r) r (ev-postfix-rest s r (undef-r "" 0)))))
+(defn ev-postfix [s :string i0 :i64 env :string] [:ref :js/r]
+  (let [i (ws s i0)
+        bname (if (ident-start-cp? (cp s i)) (string-substring s i (ident-end s i)) "")
+        r (ev-primary s i env)]
+    (if (err? r) r (ev-postfix-rest s r (undef-r "" 0) bname))))
 
 (defn mul-op [s :string i :i64] :i64
   (let [c (cp s i)]
@@ -1033,11 +1075,35 @@
 (defn ev-eq [s :string i :i64 env :string] [:ref :js/r]
   (let [r (ev-rel s i env)] (if (err? r) r (ev-eq-rest s r))))
 
-;; `&&` and `||` short-circuit, so the right operand is only evaluated when
-;; the left does not already decide the answer. The skipped text still has to
-;; be stepped over, which `skip-operand` does without evaluating it.
+;; Step over an expression WITHOUT evaluating it, by balancing brackets and
+;; respecting string literals. Stops at a top-level `,` `;` or `:`.
+;;
+;; This is what makes short-circuiting real. The previous version ran the
+;; evaluator and threw the answer away, so `false && f()` still called `f`
+;; and a conditional expression would have run both arms. Nothing in the
+;; corpus had a side effect in a skipped position, which is why it went
+;; unnoticed -- the tests all skipped pure expressions.
+;;
+;; A nested conditional in the consequent (`a ? b ? c : d : e`) stops at the
+;; INNER `:`; the classic ambiguity, and out of reach of a scanner that does
+;; not parse.
+(defn skip-expr [s :string i :i64 depth :i64] :i64
+  (let [c (cp s i)]
+    (cond
+      (< c 0) i
+      (if (= c 40) true (if (= c 91) true (= c 123))) (skip-expr s (+ i 1) (+ depth 1))
+      (if (= c 41) true (if (= c 93) true (= c 125)))
+      (if (<= depth 0) i (skip-expr s (+ i 1) (- depth 1)))
+      (if (= c 34) true (= c 39))
+      (let [e (scan-string-end s (+ i 1) c)]
+        (if (< e 0) (string-length s) (skip-expr s (+ e 1) depth)))
+      (if (= depth 0)
+        (if (= c 44) true (if (= c 59) true (= c 58)))
+        false) i
+      :else (skip-expr s (+ i 1) depth))))
+
 (defn skip-operand [s :string i :i64 env :string] :i64
-  (r-i (ev-eq s i env)))
+  (skip-expr s i 0))
 
 (defn ev-and-rest [s :string acc [:ref :js/r]] [:ref :js/r]
   (let [i (ws s (r-i acc))]
@@ -1145,7 +1211,27 @@
                  (if (err? v) v (with-env v (env-set (r-env v) name v))))
       (>= d 0) (ev-member-assign s i env d)
       (>= x 0) (ev-member-assign s i env x)
-      :else (ev-or s i env))))
+      :else
+      ;; A conditional expression evaluates ONLY the arm it takes; the other is
+      ;; stepped over by `skip-expr`, which does not run it.
+      (let [c (ev-or s i env)]
+        (if (err? c)
+          c
+          (let [j (ws s (r-i c))]
+            (if (not (at? s j 63))
+              c
+              (if (truthy? c)
+                (let [a (ev-expr s (+ j 1) (r-env c))]
+                  (if (err? a)
+                    a
+                    (let [k (ws s (r-i a))]
+                      (if (at? s k 58)
+                        (with-i a (skip-expr s (+ k 1) 0))
+                        (err-r "SyntaxError: expected : in a conditional" (r-env a) k)))))
+                (let [k (ws s (skip-expr s (+ j 1) 0))]
+                  (if (at? s k 58)
+                    (ev-expr s (+ k 1) (r-env c))
+                    (err-r "SyntaxError: expected : in a conditional" (r-env c) k)))))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; skipping -- a branch that is not taken still has to be stepped over
@@ -1678,3 +1764,28 @@
   (num-is "var f = function helper(n) { return n + 1; }; f(1)" 2))
 (defn test-declaration-needs-a-name []
   (type-is "function () { return 1; }" "error"))
+
+;; --- conditional expression and short-circuit ------------------------------
+(defn test-ternary-true [] (num-is "1 < 2 ? 10 : 20" 10))
+(defn test-ternary-false [] (num-is "1 > 2 ? 10 : 20" 20))
+(defn test-ternary-nested-in-arg []
+  (num-is "function id(x) { return x; } id(1 ? 4 : 5)" 4))
+;; The untaken arm must not RUN, not merely not be returned.
+(defn test-ternary-skips-the-untaken-arm []
+  (num-is "var t = 0; function bump() { t = t + 1; return 0; } var r = true ? 7 : bump(); r + t" 7))
+(defn test-and-short-circuits []
+  (num-is "var t = 0; function bump() { t = t + 1; return 1; } var r = false && bump(); t" 0))
+(defn test-or-short-circuits []
+  (num-is "var t = 0; function bump() { t = t + 1; return 1; } var r = true || bump(); t" 0))
+
+;; --- push / pop ------------------------------------------------------------
+(defn test-push [] (num-is "var a = [1]; a.push(2); a[1]" 2))
+(defn test-push-returns-length [] (num-is "var a = [1, 2]; a.push(3)" 3))
+(defn test-push-in-loop []
+  (num-is "var a = []; for (var i = 0; i < 4; i = i + 1) { a.push(i); } a.length" 4))
+(defn test-pop [] (num-is "var a = [1, 2, 3]; a.pop(); a.length" 2))
+(defn test-pop-returns-last [] (num-is "var a = [1, 2, 3]; a.pop()" 3))
+;; A cell is shared, so a push inside a function is seen by the caller.
+(defn test-push-through-closure []
+  (num-is "var a = []; function add(v) { a.push(v); } add(1); add(2); a.length" 2))
+(defn test-push-on-a-literal [] (num-is "[1, 2].push(3)" 3))
