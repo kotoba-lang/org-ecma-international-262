@@ -107,7 +107,11 @@
             test-or-short-circuits
             test-push test-push-returns-length test-push-in-loop
             test-pop test-pop-returns-last test-push-through-closure
-            test-push-on-a-literal])
+            test-push-on-a-literal
+            test-filter test-filter-none test-filter-all
+            test-map test-map-to-strings test-for-each-side-effect
+            test-callback-sees-outer test-filter-then-join
+            test-smoke-suite-shape])
 
   (:schemas
    {:js/r [:record :js/r
@@ -437,6 +441,9 @@
 ;; are decimal indices, and `length` is the only name it answers itself.
 (defn array-method? [k :string] :bool
   (cond (string=? k "push") true
+        (string=? k "filter") true
+        (string=? k "map") true
+        (string=? k "forEach") true
         (string=? k "pop") true
         (string=? k "join") true
         (string=? k "indexOf") true
@@ -820,6 +827,50 @@
                  (entry-put acc (string-from-i64 n)
                             (str-r (string-substring hay i hit) "" 0))))))
 
+;; Apply a function value to ONE already-evaluated argument. `call-fn` reads
+;; its arguments from the source, which a callback has no source position for.
+;; Cells flow out exactly as they do from an ordinary call, so a callback that
+;; assigns to an outer variable is seen by the caller.
+(defn apply1 [src :string f [:ref :js/r] arg [:ref :js/r] env :string] [:ref :js/r]
+  (if (not (= (r-t f) :function))
+    (err-r "TypeError: callback is not a function" env 0)
+    (let [p (ws src (+ (fn-params-start f) 1))
+          pname (if (ident-start-cp? (cp src p))
+                  (string-substring src p (ident-end src p))
+                  "")
+          base (hoist src (+ (fn-body-start f) 1)
+                      (env-make (string-concat (fn-env f) (env-bindings env))
+                                (env-cells env)))
+          out (ex-stmt src (fn-body-start f)
+                       (if (string=? pname "") base (env-put base pname arg)))]
+      (if (err? out)
+        out
+        (with-env (with-sig (if (= (r-sig out) 1) out (undef-r "" 0)) 0)
+                  (env-make (env-bindings env) (env-cells (r-env out))))))))
+
+(defn arr-rest [x [:ref :js/r]] [:ref :js/r]
+  (arr-take x 1 (arr-len x) (arr-r (arr-text 0 "") "")))
+
+(defn arr-filter [src :string x [:ref :js/r] f [:ref :js/r] env :string out [:ref :js/r]]
+  [:ref :js/r]
+  (if (<= (arr-len x) 0)
+    (with-env out env)
+    (let [v (arr-at x 0)
+          r (apply1 src f v env)]
+      (if (err? r)
+        r
+        (arr-filter src (arr-rest x) f (r-env r)
+                    (if (truthy? r) (arr-put out (arr-len out) v) out))))))
+
+(defn arr-map [src :string x [:ref :js/r] f [:ref :js/r] env :string out [:ref :js/r]]
+  [:ref :js/r]
+  (if (<= (arr-len x) 0)
+    (with-env out env)
+    (let [r (apply1 src f (arr-at x 0) env)]
+      (if (err? r)
+        r
+        (arr-map src (arr-rest x) f (r-env r) (arr-put out (arr-len out) r))))))
+
 (defn call-array-builtin [name :string recv [:ref :js/r] args [:ref :js/r]] [:ref :js/r]
   (cond
     (string=? name "join")
@@ -966,6 +1017,25 @@
                        (env-set (r-env args) bname nu))]
               (ev-postfix-rest s (with-i (with-env (num-r (arr-len nu) "" 0) e2) (r-i args))
                                (undef-r "" 0) ""))))
+
+        (if (= (r-t acc) :builtin)
+          (if (string=? (r-s acc) "filter") true
+            (if (string=? (r-s acc) "map") true (string=? (r-s acc) "forEach")))
+          false)
+        (let [args (ev-args-array s (+ i 1) (r-env acc) 0 "")]
+          (if (err? args)
+            args
+            (let [empty (arr-r (arr-text 0 "") "")
+                  res (if (string=? (r-s acc) "filter")
+                        (arr-filter s recv (arr-at args 0) (r-env args) empty)
+                        (arr-map s recv (arr-at args 0) (r-env args) empty))]
+              (if (err? res)
+                res
+                (ev-postfix-rest s (with-i (if (string=? (r-s acc) "forEach")
+                                             (with-env (undef-r "" 0) (r-env res))
+                                             res)
+                                           (r-i args))
+                                 (undef-r "" 0) "")))))
 
         (if (= (r-t acc) :builtin) (string=? (r-s acc) "pop") false)
         (let [args (ev-args-array s (+ i 1) (r-env acc) 0 "")]
@@ -1789,3 +1859,22 @@
 (defn test-push-through-closure []
   (num-is "var a = []; function add(v) { a.push(v); } add(1); add(2); a.length" 2))
 (defn test-push-on-a-literal [] (num-is "[1, 2].push(3)" 3))
+
+;; --- callbacks -------------------------------------------------------------
+(defn test-filter [] (num-is "[1, 2, 3, 4].filter(function(x) { return x > 2; }).length" 2))
+(defn test-filter-none [] (num-is "[1, 2].filter(function(x) { return x > 9; }).length" 0))
+(defn test-filter-all [] (num-is "[1, 2].filter(function(x) { return true; }).length" 2))
+(defn test-map [] (str-is "[1, 2, 3].map(function(x) { return x * 2; }).join(',')" "2,4,6"))
+(defn test-map-to-strings []
+  (str-is "[1, 2].map(function(x) { return 'n' + x; }).join('-')" "n1-n2"))
+(defn test-for-each-side-effect []
+  (num-is "var t = 0; [1, 2, 3].forEach(function(x) { t = t + x; }); t" 6))
+;; The callback runs in the environment it was written in, and its writes are
+;; seen by the caller -- the same cells, not a copy.
+(defn test-callback-sees-outer []
+  (num-is "var k = 10; var r = [1, 2].map(function(x) { return x + k; }); r[1]" 12))
+(defn test-filter-then-join []
+  (str-is "[1, 2, 3, 4].filter(function(x) { return x % 2 == 0; }).join('|')" "2|4"))
+;; The exact shape every smoke test in kotoba-lang/browser is written in.
+(defn test-smoke-suite-shape []
+  (str-is "var r = []; r.push(1 === 1 ? 1 : 'a-failed'); r.push(2 > 1 ? 1 : 'b-failed'); var bad = r.filter(function(x) { return x !== 1; }); bad.length === 0 ? 'PASS' : 'FAIL:' + bad.join(';')" "PASS"))

@@ -205,7 +205,17 @@
    "var a = [1, 2, 3]; a.pop(); a.length"
    "var a = [1, 2, 3]; a.pop()"
    "var a = []; function add(v) { a.push(v); } add(1); add(2); a.length"
-   "[1, 2].push(3)"])
+   "[1, 2].push(3)"
+   ;; callbacks
+   "[1, 2, 3, 4].filter(function(x) { return x > 2; }).length"
+   "[1, 2].filter(function(x) { return x > 9; }).length"
+   "[1, 2, 3].map(function(x) { return x * 2; }).join(',')"
+   "[1, 2].map(function(x) { return 'n' + x; }).join('-')"
+   "var t = 0; [1, 2, 3].forEach(function(x) { t = t + x; }); t"
+   "var k = 10; var r = [1, 2].map(function(x) { return x + k; }); r[1]"
+   "[1, 2, 3, 4].filter(function(x) { return x % 2 == 0; }).join('|')"
+   ;; the exact shape every smoke test in kotoba-lang/browser is written in
+   "var r = []; r.push(1 === 1 ? 1 : 'a-failed'); r.push(2 > 1 ? 1 : 'b-failed'); var bad = r.filter(function(x) { return x !== 1; }); bad.length === 0 ? 'PASS' : 'FAIL:' + bad.join(';')"])
 
 (def known-divergences
   "Cases where this engine and a real one genuinely disagree, each with the
