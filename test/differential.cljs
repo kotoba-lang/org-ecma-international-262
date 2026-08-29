@@ -162,13 +162,27 @@
    "'a,b,c'.split(',').length"
    "'hello'.includes('ell')"
    "function mine() { return 42; } var o = {indexOf: mine}; o.indexOf()"
-   "var a = [3, 1, 2]; a.slice(0, 2).length"])
+   "var a = [3, 1, 2]; a.slice(0, 2).length"
+   ;; try / catch / throw
+   "try { throw 'boom'; } catch (e) { e }"
+   "try { throw 42; } catch (e) { e }"
+   "try { throw 7; } catch (e) { typeof e }"
+   "try { 5 } catch (e) { 9 }"
+   "try { nope } catch (e) { typeof e }"
+   "var x = 1; try { x() } catch (e) { 3 }"
+   "var t = 0; try { throw 1; } catch (e) { t = 5; } t + 1"
+   "function bad() { throw 8; } try { bad() } catch (e) { e }"
+   "function safe() { try { throw 2; } catch (e) { return e + 1; } } safe()"
+   "try { try { throw 1; } catch (a) { throw a + 1; } } catch (b) { b }"
+   "try { throw {code: 4}; } catch (e) { e.code }"])
 
 (def known-divergences
   "Cases where this engine and a real one genuinely disagree, each with the
   reason. The set is asserted EXACTLY, so a divergence that appears or
   disappears fails the run instead of being absorbed silently."
   {"7 / 2" "JS numbers are IEEE-754 doubles; this engine's numbers are i64, so division truncates"
+   "try { nope } catch (e) { typeof e }"
+   "an INTERNAL error (ReferenceError, TypeError, SyntaxError) is caught as its MESSAGE STRING here. A real engine throws an Error OBJECT, which this engine has no constructor for. A thrown value keeps its own type -- `throw 42` catches a number -- so only the internal ones differ."
    "function f() { return typeof this; } f()"
    "a plain call has no receiver here, so `this` is undefined. A real engine in sloppy mode substitutes the GLOBAL object, which this engine does not have at all -- there is no globalThis to name."
    "function make() { var c = 0; function inc() { c = c + 1; return c; } return inc; } var f = make(); f(); f()"

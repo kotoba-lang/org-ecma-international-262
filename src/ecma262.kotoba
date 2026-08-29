@@ -91,7 +91,12 @@
             test-array-index-of-missing test-array-includes test-array-slice
             test-string-char-at test-string-index-of test-string-substring
             test-string-lower test-string-split test-string-split-length
-            test-string-includes test-own-property-beats-builtin])
+            test-string-includes test-own-property-beats-builtin
+            test-throw-string test-throw-number test-catch-binds-value
+            test-try-without-throw test-catch-reference-error
+            test-catch-type-error test-try-continues-after
+            test-throw-from-function test-catch-inside-function
+            test-nested-try test-throw-object])
 
   (:schemas
    {:js/r [:record :js/r
@@ -163,6 +168,14 @@
   (record-new [:ref :js/r] :array 0 body env 0 0))
 
 (defn err? [x [:ref :js/r]] :bool (= (r-t x) :error))
+
+;; A THROWN error carries the thrown VALUE, not just a message, so
+;; `catch (e)` can hand back what was actually thrown -- `throw 42` binds a
+;; number, `throw 'x'` a string. It is marked by `:n` = 1, which an internal
+;; error (ReferenceError, SyntaxError, TypeError) leaves at 0 and whose `:s`
+;; is its message. Both are catchable, as they are in a real engine.
+(defn throw-r [v [:ref :js/r] env :string i :i64] [:ref :js/r]
+  (record-new [:ref :js/r] :error 1 (env-put "" "v" v) env 2 i))
 
 ;; ---------------------------------------------------------------------------
 ;; characters
@@ -1200,6 +1213,42 @@
           (undef-r (env-put env name (undef-r env 0)) (eat-semi s k))))
       (err-r "SyntaxError: expected a name after var/let/const" env j))))
 
+;; `catch` receives the thrown value for a `throw`, and the MESSAGE as a
+;; string for an internal error -- there is no Error object to construct.
+(defn caught-value [e [:ref :js/r]] [:ref :js/r]
+  (if (= (r-n e) 1)
+    (member-get (r-s e) "v")
+    (str-r (r-s e) "" 0)))
+
+(defn ex-try [s :string i :i64 env :string] [:ref :js/r]
+  (let [b (ws s (+ i 3))]
+    (if (not (at? s b 123))
+      (err-r "SyntaxError: expected { after try" env b)
+      (let [after (skip-stmt s b)
+            m (ws s after)]
+        (if (not (word? s m "catch"))
+          (err-r "SyntaxError: try without catch is not supported" env m)
+          (let [o (ws s (+ m 5))]
+            (if (not (at? s o 40))
+              (err-r "SyntaxError: expected ( after catch" env o)
+              (let [n0 (ws s (+ o 1))
+                    ne (ident-end s n0)
+                    name (string-substring s n0 ne)
+                    c (ws s ne)]
+                (if (not (at? s c 41))
+                  (err-r "SyntaxError: expected ) after the catch parameter" env c)
+                  (let [cb (ws s (+ c 1))
+                        ran (ex-stmt s b env)]
+                    (if (err? ran)
+                      ;; The handler runs with the caught value bound, and the
+                      ;; error stops here: the result carries signal 0, so the
+                      ;; enclosing sequence keeps going.
+                      (let [out (ex-stmt s cb (env-put env name (caught-value ran)))]
+                        (if (err? out) out (with-i out (skip-stmt s cb))))
+                      (if (= (r-sig ran) 1)
+                        ran
+                        (with-i ran (skip-stmt s cb))))))))))))))
+
 (defn ex-stmt [s :string i0 :i64 env :string] [:ref :js/r]
   (let [i (ws s i0)]
     (cond
@@ -1245,6 +1294,12 @@
             (with-sig (undef-r (env-put env (r-s h) f)
                                (skip-braced s (r-i h) 0))
                       3))))
+
+      (word? s i "try") (ex-try s i env)
+
+      (word? s i "throw")
+      (let [v (ev-expr s (+ i 5) env)]
+        (if (err? v) v (throw-r v (r-env v) (eat-semi s (r-i v)))))
 
       (word? s i "return")
       (let [j (ws s (+ i 6))]
@@ -1504,3 +1559,21 @@
 (defn test-string-includes [] (str-is "'hello'.includes('ell')" "true"))
 (defn test-own-property-beats-builtin []
   (num-is "function mine() { return 42; } var o = {indexOf: mine}; o.indexOf()" 42))
+
+;; --- try / catch / throw ---------------------------------------------------
+(defn test-throw-string [] (str-is "try { throw 'boom'; } catch (e) { e }" "boom"))
+(defn test-throw-number [] (num-is "try { throw 42; } catch (e) { e }" 42))
+(defn test-catch-binds-value [] (str-is "try { throw 7; } catch (e) { typeof e }" "number"))
+(defn test-try-without-throw [] (num-is "try { 5 } catch (e) { 9 }" 5))
+(defn test-catch-reference-error [] (str-is "try { nope } catch (e) { typeof e }" "string"))
+(defn test-catch-type-error [] (num-is "var x = 1; try { x() } catch (e) { 3 }" 3))
+(defn test-try-continues-after []
+  (num-is "var t = 0; try { throw 1; } catch (e) { t = 5; } t + 1" 6))
+(defn test-throw-from-function []
+  (num-is "function bad() { throw 8; } try { bad() } catch (e) { e }" 8))
+(defn test-catch-inside-function []
+  (num-is "function safe() { try { throw 2; } catch (e) { return e + 1; } } safe()" 3))
+(defn test-nested-try []
+  (num-is "try { try { throw 1; } catch (a) { throw a + 1; } } catch (b) { b }" 2))
+(defn test-throw-object []
+  (num-is "try { throw {code: 4}; } catch (e) { e.code }" 4))
