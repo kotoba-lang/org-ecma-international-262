@@ -285,7 +285,15 @@
    "try { nope } catch (e) { e instanceof TypeError ? 'yes' : 'no' }"
    "var o = {a: 1}; o instanceof Error ? 'yes' : 'no'"
    "1 instanceof Error ? 'yes' : 'no'"
-   "new RangeError('x') instanceof Error ? 'yes' : 'no'"])
+   "new RangeError('x') instanceof Error ? 'yes' : 'no'"
+   ;; user constructors -- no prototype chain, but the question a script asks
+   "function Point(x) { this.x = x; } typeof new Point(1)"
+   "function Point(x) { this.x = x; } new Point(7).x"
+   "function P(x, y) { this.x = x; this.y = y; } var p = new P('a', 'b'); p.x + p.y"
+   "function P() { } new P() instanceof P ? 'yes' : 'no'"
+   "function P() { } function Q() { } new P() instanceof Q ? 'yes' : 'no'"
+   "function P() { this.x = 1; return {x: 9}; } new P().x"
+   "function C() { this.n = 3; this.twice = function () { return this.n * 2; }; } new C().twice()"])
 
 (def known-divergences
   "Cases where this engine and a real one genuinely disagree, each with the

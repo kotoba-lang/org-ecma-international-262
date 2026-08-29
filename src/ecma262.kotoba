@@ -156,6 +156,10 @@
             test-new-worker test-new-websocket test-post-message test-socket-send
             test-onmessage-registers test-onclick-registers
             test-onmessage-fires-with-the-message test-on-non-function-is-a-write
+            test-user-constructor test-constructor-sets-this
+            test-constructor-with-two-fields test-constructor-instanceof
+            test-constructor-is-not-another test-constructor-returning-an-object
+            test-constructor-method test-calling-a-constructor-without-new
             test-error-message test-error-name test-error-is-an-object
             test-thrown-value-is-not-wrapped test-type-error-name
             test-ternary-true test-ternary-false test-ternary-nested-in-arg
@@ -1120,6 +1124,37 @@
 ;; caught error becomes (see `error-object`). The two must agree, or
 ;; `catch (e) { e.message }` would answer differently depending on whether the
 ;; engine threw or the script did.
+;; A user constructor: `function Point(x, y) { this.x = x; }` then
+;; `new Point(1, 2)`. The call is spelled out rather than delegated to
+;; `call-fn` because what is wanted back is not the RETURN value but `this`
+;; after the body has run, and `call-fn` keeps only the caller's bindings.
+;;
+;; The object remembers the name it was built with, under `%ctor` -- a name no
+;; JavaScript identifier can spell -- so `instanceof` can answer for it
+;; without a prototype chain. (`o['%ctor']` does reach it: a bracket lookup
+;; takes any string. A real hole, and a small one.)
+(defn ev-new-user [s :string k :i64 f [:ref :js/r] env :string nm :string]
+  [:ref :js/r]
+  (let [obj (obj-r (entry-put "" "%ctor" (str-r nm "" 0)) "")
+        base (hoist s (+ (fn-body-start f) 1)
+                    (env-put (env-make (string-concat (fn-env f) (env-bindings env))
+                                       (env-cells env))
+                             "this" obj))
+        bound (bind-args s (+ (fn-params-start f) 1) (+ k 1) env base)]
+    (if (err? bound)
+      bound
+      (let [out (ex-stmt s (fn-body-start f) (r-s bound))]
+        (if (err? out)
+          out
+          ;; A constructor that returns an object answers with it; otherwise
+          ;; the answer is `this`, which is what a real engine does too.
+          (let [built (if (= (r-t out) :object) out (env-get (r-env out) "this"))]
+            (if (err? built)
+              built
+              (with-i (with-env built (env-make (env-bindings env)
+                                                (env-cells (r-env out))))
+                      (skip-params s (+ k 1))))))))))
+
 (defn ev-new [s :string i :i64 env :string] [:ref :js/r]
   (let [j (ws s i)]
     (if (ident-start-cp? (cp s j))
@@ -1159,7 +1194,14 @@
                                                 "name" (str-r nm "" 0)) "")
                               env)
                     k))
-          (err-r "TypeError: unsupported constructor" env j))))
+          ;; Anything else may be a user constructor: an ordinary function
+          ;; called with `new`.
+          (let [f (env-get env nm)]
+            (if (= (r-t f) :function)
+              (if (at? s k 40)
+                (ev-new-user s k f env nm)
+                (err-r "TypeError: a constructor call needs ()" env k))
+              (err-r "TypeError: unsupported constructor" env j))))))
       (err-r "SyntaxError: expected a constructor name after new" env j))))
 
 (defn ev-primary [s :string i0 :i64 env :string] [:ref :js/r]
@@ -1677,7 +1719,10 @@
 ;; constructor it does not have.
 (defn instance-of? [x [:ref :js/r] ctor :string] :i64
   (if (= (r-t x) :object)
-    (let [nm (member-get (r-s x) "name")]
+    (let [built (member-get (r-s x) "%ctor")
+          nm (if (= (r-t built) :string)
+               (if (string=? (r-s built) "") (member-get (r-s x) "name") built)
+               (member-get (r-s x) "name"))]
       (if (= (r-t nm) :string)
         (cond
           (string=? ctor "Error") (if (str-ends-with? (r-s nm) "Error") 1 0)
@@ -3297,3 +3342,26 @@
 (defn test-on-non-function-is-a-write []
   (dom-is "document.getElementById('a').once = 'x';" (dom-entry "" "a" "")
           "4:once1:a1:x"))
+
+;; --- user constructors ----------------------------------------------------
+;; No prototype chain: the object remembers the name it was built with, which
+;; is enough for the question `instanceof` is actually asked.
+(defn test-user-constructor []
+  (str-is "function Point(x) { this.x = x; } typeof new Point(1)" "object"))
+(defn test-constructor-sets-this []
+  (num-is "function Point(x) { this.x = x; } new Point(7).x" 7))
+(defn test-constructor-with-two-fields []
+  (str-is "function P(x, y) { this.x = x; this.y = y; } var p = new P('a', 'b'); p.x + p.y" "ab"))
+(defn test-constructor-instanceof []
+  (str-is "function P() { } new P() instanceof P ? 'yes' : 'no'" "yes"))
+(defn test-constructor-is-not-another []
+  (str-is "function P() { } function Q() { } new P() instanceof Q ? 'yes' : 'no'" "no"))
+;; A constructor that returns an object answers with it, as a real one does.
+(defn test-constructor-returning-an-object []
+  (num-is "function P() { this.x = 1; return {x: 9}; } new P().x" 9))
+(defn test-constructor-method []
+  (num-is "function C() { this.n = 3; this.twice = function () { return this.n * 2; }; } new C().twice()" 6))
+;; Called without `new` it is an ordinary function, so the field lands nowhere
+;; the caller can see and the call answers undefined.
+(defn test-calling-a-constructor-without-new []
+  (str-is "function P(x) { this.x = x; } typeof P(1)" "undefined"))

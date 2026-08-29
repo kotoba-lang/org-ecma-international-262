@@ -21,9 +21,9 @@ page <script> text ──runtime input──┐
 | | |
 |---|---|
 | Language | expressions, `var`/`let`/`const`, assignment, **compound assignment** (`+=` `-=` `*=` `/=` `%=`) and **`++`/`--`** (prefix and postfix), `if`/`else`, ternary `?:`, `while`, `for`, **`for...of`** and **`for...in`**, **`switch`** (with fallthrough), `break`/`continue`, blocks, **functions** (declarations, function expressions incl. named and immediate, parameters, `return`, recursion, mutual recursion, hoisting), **closures** (capture by reference), **arrays and objects** (literals, `.k`, `[k]`, `.length`, member assignment, nesting), **method calls** and `this`, **builtins** (`push`/`pop`/`filter`/`map`/`forEach`/`join`/`indexOf`/`includes`/`slice`; `charAt`/`indexOf`/`substring`/`toLowerCase`/`toUpperCase`/`split`/`includes`), **`throw`/`try`/`catch`/`finally`** with real `Error` objects and **`new Error(...)`**, `typeof` (including the spec's unresolvable reference, so `typeof window` is `undefined` rather than an error), short-circuit `&&`/`||`, comments |
-| Not yet | user constructors and a prototype chain (`instanceof` answers without one — see Gaps), IEEE-754 numbers (integers only) |
-| Own tests | **275/275 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host, run in chunks) and on the restricted-ESM artifact |
-| Differential | **237/238 agree with a real host V8** (1 recorded divergence), and **62/63 agree with quickjs-ng** — 35/36 language, 22/22 DOM, 5/5 events — through `browser`'s `test/runtime-differential.cljs`, against the engine this one would replace |
+| Not yet | a prototype chain (constructors and `instanceof` work without one — see Gaps), IEEE-754 numbers (integers only) |
+| Own tests | **283/283 inside wasm32** (`--target wasm32-browser`, instantiated under the real browser host, run in chunks) and on the restricted-ESM artifact |
+| Differential | **250/251 agree with a real host V8** (1 recorded divergence), and **75/76 agree with quickjs-ng** — 35/36 language, 35/35 DOM, 5/5 events — through `browser`'s `test/runtime-differential.cljs`, against the engine this one would replace |
 | Capabilities | **none** — `kotoba -M check` reports `:effects #{}`, DOM bridge included. A write is a VALUE the host replays; the authority never leaves the host |
 | wasm32-browser | **35 KB, instantiates and runs** — this is the target that replaces the QuickJS blob |
 
@@ -105,6 +105,14 @@ only the two simplest tests pass at that setting.
   long-running program bounded by the 64 KiB string ceiling will reach it; a
   page script will not. Freeing needs a reachability pass this engine has no
   reason to run yet.
+- **Constructors work; the prototype chain does not exist.** `function
+  Point(x) { this.x = x }` then `new Point(7).x` is 7, a constructor that
+  returns an object answers with it, and `this` inside a method is the
+  receiver. What is missing is `Point.prototype` — so there is no shared
+  method table and no inheritance. The object remembers the name it was built
+  with under `%ctor`, a name no JavaScript identifier can spell, which is what
+  lets `instanceof` answer. `o['%ctor']` does reach it: a bracket lookup takes
+  any string. A real hole, and a small one.
 - **`instanceof` answers without a prototype chain.** There is none to walk,
   so it answers the question a `catch` actually asks — `e instanceof
   TypeError` — by matching the caught error's `name`, and `e instanceof Error`
