@@ -34,7 +34,7 @@ kotoba -M check src/ecma262.kotoba                       # types + effects
 
 kotoba -M compile src/ecma262.kotoba --target js \
   --fuel 200000000 --output target/ecma262.mjs
-nbb test/differential.cljk                               # vs the host engine
+kbb --backend sci test/differential.cljk                               # vs the host engine
 ```
 
 ```bash
@@ -284,8 +284,8 @@ the Status table above is the claim.
 ## Running the tests inside wasm32
 
 ```bash
-nbb test/wasm-suite.cljk        # five chunks of 40, each compiled and run as its own module
-nbb test/wasm-suite.cljk 20     # smaller chunks
+kbb --backend sci test/wasm-suite.cljk        # five chunks of 40, each compiled and run as its own module
+kbb --backend sci test/wasm-suite.cljk 20     # smaller chunks
 ```
 
 Exit 0 every test passed, 1 a test failed, **2 the harness could not answer**
