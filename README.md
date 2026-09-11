@@ -34,7 +34,7 @@ kotoba -M check src/ecma262.kotoba                       # types + effects
 
 kotoba -M compile src/ecma262.kotoba --target js \
   --fuel 200000000 --output target/ecma262.mjs
-nbb test/differential.cljs                               # vs the host engine
+nbb test/differential.cljk                               # vs the host engine
 ```
 
 ```bash
@@ -97,7 +97,7 @@ only the two simplest tests pass at that setting.
   functions behave: measured 2026-08-29, a build that DEFINES 170 tests and
   exports 3 still exceeds the ceiling, while a build physically containing
   only those 3 passes. **Function bodies are dropped when unreachable; their
-  literals are not.** `test/wasm-suite.cljs` therefore slices the source
+  literals are not.** `test/wasm-suite.cljk` therefore slices the source
   physically and runs five chunks — 180/180 inside wasm32. As the engine grows
   it will approach the ceiling on its own, and that is the thing to watch.
 - **Cells are never freed.** The cell region only grows, because a cell id is
@@ -284,8 +284,8 @@ the Status table above is the claim.
 ## Running the tests inside wasm32
 
 ```bash
-nbb test/wasm-suite.cljs        # five chunks of 40, each compiled and run as its own module
-nbb test/wasm-suite.cljs 20     # smaller chunks
+nbb test/wasm-suite.cljk        # five chunks of 40, each compiled and run as its own module
+nbb test/wasm-suite.cljk 20     # smaller chunks
 ```
 
 Exit 0 every test passed, 1 a test failed, **2 the harness could not answer**

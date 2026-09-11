@@ -7,7 +7,7 @@
   real JS engine instead: every case is evaluated twice and the two answers
   must agree.
 
-  Run:  nbb test/differential.cljs [path/to/ecma262.mjs]
+  Run:  nbb test/differential.cljk [path/to/ecma262.mjs]
 
   The artifact is built by:
     kotoba -M compile src/ecma262.kotoba --target js \\
