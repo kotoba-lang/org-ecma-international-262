@@ -16,7 +16,7 @@
   So the split is physical: the source is sliced into chunks of test
   functions, each chunk compiled and run on its own.
 
-  Run:  nbb test/wasm-suite.cljk [chunk-size]
+  Run:  kbb --backend sci test/wasm-suite.cljk [chunk-size]
 
   Exit: 0 every test passed, 1 a test failed, 2 the harness could NOT answer
   (no compiler, no host) -- which is not the same as passing and must never
